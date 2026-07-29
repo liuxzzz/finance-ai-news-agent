@@ -1,0 +1,24 @@
+{
+  "name": "@finance-ai-news-agent/output-file",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local file output plugin.",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@finance-ai-news-agent/plugin-sdk": "workspace:*"
+  }
+}

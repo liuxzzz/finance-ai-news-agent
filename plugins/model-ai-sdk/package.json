@@ -1,0 +1,25 @@
+{
+  "name": "@finance-ai-news-agent/model-ai-sdk",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AI SDK based ModelProvider adapter.",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@finance-ai-news-agent/plugin-sdk": "workspace:*",
+    "ai": "7.0.41"
+  }
+}

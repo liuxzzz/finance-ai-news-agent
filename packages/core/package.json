@@ -1,0 +1,27 @@
+{
+  "name": "@finance-ai-news-agent/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Framework-neutral domain contracts and LangGraph agent orchestration.",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@finance-ai-news-agent/plugin-sdk": "workspace:*",
+    "@langchain/langgraph": "1.4.8",
+    "zod": "4.4.3"
+  }
+}

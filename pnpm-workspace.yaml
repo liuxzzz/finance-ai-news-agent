@@ -1,0 +1,11 @@
+packages:
+  - apps/*
+  - packages/*
+  - plugins/*
+
+allowBuilds:
+  esbuild: true
+
+minimumReleaseAgeExclude:
+  - "@ai-sdk/gateway@4.0.31"
+  - ai@7.0.41

@@ -1,0 +1,22 @@
+{
+  "name": "@finance-ai-news-agent/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "CLI entrypoint for Finance & AI News Agent.",
+  "license": "Apache-2.0",
+  "bin": {
+    "finance-ai-news-agent": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "demo": "node dist/index.js demo",
+    "dev": "tsx src/index.ts demo",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@finance-ai-news-agent/core": "workspace:*",
+    "@finance-ai-news-agent/output-file": "workspace:*",
+    "@finance-ai-news-agent/plugin-sdk": "workspace:*"
+  }
+}
