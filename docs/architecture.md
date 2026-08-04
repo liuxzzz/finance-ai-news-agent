@@ -13,12 +13,14 @@
 - 框架无关的插件公共契约；
 - 确定性 `RunExecutor`、Run/Stage 状态机、发布门禁和审计接口；
 - PostgreSQL Runtime Store、版本化迁移、运行锁和 LangGraph durable checkpoint；
-- AI SDK 模型、本地文件输出和 MCP Client 适配器骨架；
+- DeepSeek AI SDK 结构化模型适配、版本化编辑/审核 Prompt 和确定性引用渲染；
+- 本地文件输出和 MCP Client 适配器骨架；
 - 完全离线、无需模型密钥和外部服务的 Fixture Demo；
 - PostgreSQL + pgvector 的本地基础设施配置。
 
-目前尚未接入真实新闻来源、业务 Prompt、模型调用和长期记忆。当前代码已经验证
-**模块边界、持久化执行闭环和故障恢复**，但还不是可直接用于生产的新闻研究系统。
+目前已经能使用真实 DeepSeek 模型处理合成回放证据，但尚未接入实时新闻来源、MCP Gateway
+和长期记忆。当前代码已经验证**模块边界、结构化模型链路、持久化执行闭环和故障恢复**，
+但还不是可直接用于生产的实时新闻研究系统。
 
 ## 2. 总体架构
 
@@ -39,14 +41,15 @@ flowchart LR
     Output --> SDK
     Storage --> SDK
 
-    Model[plugins/model-ai-sdk] --> SDK
+    CLI --> Model[plugins/model-ai-sdk]
+    Model --> SDK
     Model --> AISDK[AI SDK]
     Source[plugins/source-mcp] --> MCP[MCP TypeScript SDK]
     Storage --> PG[(PostgreSQL)]
     Storage --> Checkpoint[LangGraph PostgresSaver]
 
     Source -. 尚未接入 Demo .-> CLI
-    Model -. 尚未接入 Demo .-> CLI
+    Model --> DeepSeek[DeepSeek API]
 ```
 
 各层职责如下：
@@ -99,9 +102,9 @@ flowchart LR
 
 | 节点           | 输入关注点        | 输出到共享状态                        | 当前实现                            |
 | -------------- | ----------------- | ------------------------------------- | ----------------------------------- |
-| Research       | 研究主题          | `plan`、`evidence`                    | 生成固定计划和两条离线 Fixture 证据 |
-| Curate & Write | 证据、Review 反馈 | `stories`、`draft`、`revisionCount`   | 聚合事件；首稿无来源，修订稿补来源  |
-| Review         | 草稿与证据        | `approved`、`critique`、`reviewRoute` | 检查来源并选择补证或修订路线        |
+| Research       | 研究主题          | `plan`、`evidence`                    | Fixture 或合成回放 Evidence         |
+| Curate & Write | 证据、Review 反馈 | `stories`、`draft`、`revisionCount`   | Fixture，或 DeepSeek 结构化 Story   |
+| Review         | 草稿与证据        | `approved`、`critique`、`reviewRoute` | Fixture，或 DeepSeek 结构化审核决定 |
 
 Review 的条件分支规则是：
 
@@ -133,6 +136,7 @@ Review 的条件分支规则是：
 | `approved`      | 当前草稿是否通过                                   | Review         |
 | `reviewRoute`   | 未通过时选择 `research` 或 `revise`                | Review         |
 | `revisionCount` | 已执行的修订次数                                   | Curate & Write |
+| `modelUsage`    | 模型请求数和累计 Token；通过 reducer 相加          | 模型节点       |
 | `trace`         | 节点执行轨迹；通过 reducer 追加而不是覆盖          | 所有节点       |
 
 状态字段使用 Zod 描述，既提供 TypeScript 类型推导，也在图运行时约束状态形状。
@@ -176,18 +180,25 @@ sequenceDiagram
 `pnpm run:fixture` 使用同一套 Runtime，但注入 `PostgresRuntimeStore` 和 `PostgresSaver`；它支持
 重复触发复用、失败恢复以及 `status <run-id>` 审计查询。
 
+`pnpm run:ai` 进一步注入官方 DeepSeek Provider、严格结构化的 Curate/Review Handler 和合成回放
+Evidence。模型只返回 Story 与审核业务字段；Evidence URL 不在模型输出 Schema 中，最终 Markdown
+链接由 Core 使用原始 Evidence 确定性生成。该命令用于 P2 模型链路验收，不代表实时新闻采集。
+Provider HTTP 自动重试被关闭，Schema 恢复调用显式计入 `modelUsage`；但在节点成功 checkpoint 前
+发生的进程中断仍可能导致模型重复计费，跨恢复的硬预算需要后续持久化 Model Call Ledger。
+
 ## 6. Plugin SDK
 
 `packages/plugin-sdk` 是 Core 与外部实现之间的稳定协议层，公共类型不暴露第三方框架类型。
 
-| 契约             | 用途                                                        | 当前实现情况                                       |
-| ---------------- | ----------------------------------------------------------- | -------------------------------------------------- |
-| `PluginManifest` | 描述插件 ID、名称、版本、类型和 Core 兼容范围               | Model 与 File Output 已提供 Manifest               |
-| `ModelProvider`  | 接收角色、系统提示和用户提示，返回文本、模型名和 token 用量 | `model-ai-sdk` 已适配 `generateText`，未接入 Demo  |
-| `McpGateway`     | 列出允许的工具并执行结构化工具调用                          | 已定义接口；`source-mcp` 目前仅创建原始 MCP Client |
-| `MemoryPort`     | 搜索记忆和提交记忆候选                                      | 已定义接口；暂无实现                               |
-| `OutputPlugin`   | 按稳定 `deliveryKey` 幂等发送并返回回执                     | `output-file` 已实现并通过幂等契约测试             |
-| `RuntimeStore`   | 持久化 Run、Stage、Artifact、Delivery 和运行锁              | PostgreSQL 与内存实现均已接入                      |
+| 契约                      | 用途                                                        | 当前实现情况                                       |
+| ------------------------- | ----------------------------------------------------------- | -------------------------------------------------- |
+| `PluginManifest`          | 描述插件 ID、名称、版本、类型和 Core 兼容范围               | Model 与 File Output 已提供 Manifest               |
+| `ModelProvider`           | 接收角色、系统提示和用户提示，返回文本、模型名和 token 用量 | `model-ai-sdk` 已适配 `generateText`               |
+| `StructuredModelProvider` | 使用 Zod Schema 约束 JSON 业务输出                          | DeepSeek + AI SDK `Output.object` 已接入 `run-ai`  |
+| `McpGateway`              | 列出允许的工具并执行结构化工具调用                          | 已定义接口；`source-mcp` 目前仅创建原始 MCP Client |
+| `MemoryPort`              | 搜索记忆和提交记忆候选                                      | 已定义接口；暂无实现                               |
+| `OutputPlugin`            | 按稳定 `deliveryKey` 幂等发送并返回回执                     | `output-file` 已实现并通过幂等契约测试             |
+| `RuntimeStore`            | 持久化 Run、Stage、Artifact、Delivery 和运行锁              | PostgreSQL 与内存实现均已接入                      |
 
 `PluginKindSchema` 预留了 `model`、`embedding`、`source`、`storage` 和 `output`
 五类插件，但当前还没有为每一类都提供完整接口和实现。
@@ -223,9 +234,11 @@ sequenceDiagram
 
 ### 7.1 `apps/cli`
 
-- `src/index.ts`：解析 `demo`、`migrate`、`run` 和 `status` 命令；
+- `src/index.ts`：解析 `demo`、`migrate`、`run`、`run-ai` 和 `status` 命令；
 - `src/demo.ts`：组装内存 Runtime、运行 Agent Graph 并输出 Markdown；
 - `src/runtime-command.ts`：组装 PostgreSQL Runtime、迁移、持久化执行和审计查询；
+- `src/ai-runtime-command.ts`：安全读取 DeepSeek 配置并组装结构化模型回放 Run；
+- `src/replay-research.ts`：提供明确标注为合成数据的固定 Evidence；
 - `src/fixture-handlers.ts`：定义 Research、Curate & Write、Review 三个离线 Fixture Handler；
 - `src/studio-graph.ts`：导出供 LangGraph Studio 加载的无本地 checkpointer Graph；
 - `package.json`：声明 CLI 二进制名和对 Core、Plugin SDK、File Output 的依赖。
@@ -239,6 +252,9 @@ sequenceDiagram
 - `src/agent-workflow.ts`：封装 LangGraph 首次执行与 checkpoint 恢复；
 - `src/run-executor.ts`：负责 Run 幂等、Stage 恢复、发布门禁、制品和发送；
 - `src/in-memory-runtime-store.ts`：为 Demo 和离线测试提供 RuntimeStore；
+- `src/model-node-output.ts`：定义严格的 Research、Curate 和 Review 输出 Schema；
+- `src/model-agent-handlers.ts`：实现结构化模型节点、预算、引用校验和确定性 Markdown；
+- `src/finance-ai-prompts.ts`：当前 P2 使用的版本化 Curate/Review Prompt；
 - `src/index.ts`：Core 的公开导出面，调用方不需要引用内部文件；
 - `src/agent-graph.test.ts`：验证定向修订、Research 补证、预算耗尽和执行轨迹。
 
@@ -253,8 +269,8 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 
 ### 7.4 `plugins`
 
-- `model-ai-sdk`：把 AI SDK 的 `LanguageModel` 包装成项目 `ModelProvider`，并统一返回
-  模型名和 token 使用量；
+- `model-ai-sdk`：把 AI SDK 的 `LanguageModel` 包装成项目 `ModelProvider`，并使用官方
+  DeepSeek Provider 实现 `StructuredModelProvider`；
 - `output-file`：确保目标目录存在后写入 UTF-8 文件，是当前唯一接入执行闭环的插件；
 - `source-mcp`：创建官方 MCP SDK `Client`，尚未实现连接传输、工具白名单和
   `McpGateway`；
@@ -269,13 +285,14 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 
 `db/migrations` 当前创建 `runs`、`run_stages`、`artifacts` 和 `deliveries`。迁移 runner 使用
 全局 advisory lock、checksum 和逐文件事务；它与只在数据卷首次创建时执行的 `db/init` 分离。
-离线 `pnpm demo` 不需要数据库，持久化 `pnpm run:fixture` 需要先执行 `pnpm db:migrate`。
+离线 `pnpm demo` 不需要数据库，持久化 `pnpm run:fixture` 和 `pnpm run:ai` 需要先执行
+`pnpm db:migrate`。
 
 ### 7.6 `presets` 与 `prompts`
 
-- `presets/finance-ai`：未来承载主题分类、栏目、来源建议、角色指令和回放评测；
-- `prompts`：未来按角色和版本存放 Prompt；
-- 两个目录目前只有说明文件，不参与构建或运行。
+- `presets/finance-ai`：未来承载主题分类、栏目、来源建议和完整回放评测；
+- 当前可执行的 P2 Prompt 以版本化 TypeScript 常量放在 Core，避免构建时丢失 Markdown 资源；
+- Preset 成为独立 workspace package 后，再把金融领域 Prompt 从 Core 移出。
 
 将领域内容放在这两个目录，可以让 Core 保持通用的信息研究能力，而不是把金融与 AI
 规则硬编码进工作流。

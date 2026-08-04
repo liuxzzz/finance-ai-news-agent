@@ -1,8 +1,8 @@
 # Finance & AI News Agent 实现计划与进度
 
 > 更新日期：2026-08-04
-> 当前阶段：持久化 Runtime 完成，准备进入 AI 节点实现
-> 总体进度：约 40%
+> 当前阶段：DeepSeek 结构化节点已接入，准备进入真实来源采集
+> 总体进度：约 50%
 
 ## 1. 阶段进度
 
@@ -10,7 +10,7 @@
 | ----------------- | ------------------------------------------------------------ | ------ | ---: | -------: |
 | P0 工程骨架       | Monorepo、三节点 Graph、Plugin SDK、Fixture Demo、CI、Studio | 已完成 | 100% |        - |
 | P1 运行时与持久化 | Run/Stage 状态机、数据库迁移、幂等、恢复、审计               | 已完成 | 100% |        - |
-| P2 AI 节点        | Prompt、结构化输出、真实模型、预算、回放评测                 | 待实施 |  10% |   1–2 周 |
+| P2 AI 节点        | Prompt、结构化输出、真实模型、预算、回放评测                 | 进行中 |  85% |   1–2 周 |
 | P3 MCP 采集       | MCP Gateway、权限与预算、契约测试、金融/AI 来源              | 待实施 |   5% |     2 周 |
 | P4 内容处理       | 标准化、去重、聚类、排序、证据引用、Digest                   | 待实施 |   5% |   1–2 周 |
 | P5 输出闭环       | 制品持久化、飞书发送、发送幂等、重发                         | 待实施 |  10% |     1 周 |
@@ -57,9 +57,33 @@
 验收结果：单元测试覆盖正常运行、并发重复触发、Review 拒绝、失败恢复和发送重试；真实
 PostgreSQL 验证确认相同 Run 可复用，失败节点从 durable checkpoint 恢复，且只产生一个 Delivery。
 
-下一迭代：版本化 Prompt、结构化节点输出、真实 `ModelProvider` 和基础回放评测。
+该 Runtime 现由下一节的结构化 AI 节点迭代消费。
 
-## 5. MVP 里程碑
+## 5. 当前 AI 节点迭代
+
+**目标：用真实 DeepSeek 模型验证结构化编辑与审核链路，同时保持 Research 可离线回放。**
+
+- [x] 增加 `StructuredModelProvider` 公共契约
+- [x] 使用官方 DeepSeek AI SDK Provider 和可配置 API 根地址
+- [x] 实现版本化 Curate/Review Prompt
+- [x] 使用严格 Zod Schema 校验模型输出
+- [x] 禁止模型生成来源 URL，Markdown 链接由 Evidence 确定性渲染
+- [x] 校验所有 Story、Review 对 Evidence ID 的引用
+- [x] 支持空输出或非法结构的一次受限恢复调用
+- [x] 记录模型请求数和 Token Usage
+- [x] 增加 `run-ai` 持久化回放命令和离线契约测试
+- [x] 使用本地 DeepSeek 凭据完成真实 API 冒烟测试
+- [ ] 增加持久化 Model Call Ledger，实现跨进程恢复的硬成本上限
+- [ ] 接入 MCP 实时新闻来源并替换合成回放 Evidence
+
+完成标准：DeepSeek 对固定 Evidence 生成结构化 Stories，Review 能通过或定向修订；任意未知
+Evidence ID 都被程序拒绝，最终制品的 URL 与输入 Evidence 完全一致，密钥不进入状态或审计数据。
+
+2026-08-04 冒烟验收：真实 DeepSeek 回放 Run 一次执行成功，完成 2 次结构化模型请求；随后同一
+Run 从 dry-run 恢复交付，并在第三次触发时直接幂等复用，模型请求数未增加。生成制品和运行审计
+均未包含 API Key。
+
+## 6. MVP 里程碑
 
 | 里程碑        | 完成条件                                            |
 | ------------- | --------------------------------------------------- |

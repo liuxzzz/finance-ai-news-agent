@@ -12,13 +12,14 @@
   "scripts": {
     "build": "pnpm --recursive --sort run build",
     "check": "pnpm build && pnpm typecheck && pnpm lint && pnpm format:check && pnpm test",
-    "db:migrate": "pnpm build && pnpm --filter @finance-ai-news-agent/cli migrate",
+    "db:migrate": "pnpm build && node --env-file-if-exists=.env.local apps/cli/dist/index.js migrate",
     "demo": "pnpm build && pnpm --filter @finance-ai-news-agent/cli demo",
     "dev": "pnpm build && pnpm --filter @finance-ai-news-agent/cli dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "run:fixture": "pnpm build && pnpm --filter @finance-ai-news-agent/cli run:fixture",
+    "run:ai": "pnpm build && node --env-file-if-exists=.env.local apps/cli/dist/index.js run-ai",
+    "run:fixture": "pnpm build && node --env-file-if-exists=.env.local apps/cli/dist/index.js run",
     "studio": "langgraphjs dev",
     "test": "pnpm --recursive --if-present run test",
     "typecheck": "pnpm --recursive --if-present run typecheck"

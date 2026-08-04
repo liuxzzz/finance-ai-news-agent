@@ -84,7 +84,32 @@ pnpm run:fixture -- --report-date 2026-08-04 --edition daily
 随后用相同参数移除 `--dry-run`，会发送已有制品而不会重新执行 Agent Graph。
 
 CLI 还支持 `status <run-id>` 查询 Run、Stage 和 Delivery 审计记录。当前 `run` 命令仍使用
-Fixture Handler，目的是先验证 Runtime；真实模型将在下一阶段接入。
+Fixture Handler，目的是验证 Runtime，且不需要任何模型密钥。
+
+### DeepSeek AI 回放
+
+`run-ai` 使用真实 DeepSeek 模型执行结构化编辑和审核节点；Research 暂时读取仓库内的合成
+回放证据，以便先独立验证 Prompt、Schema、引用和恢复机制。它不会采集实时新闻。
+
+不要在聊天、命令参数或 Git 文件中粘贴 API Key。复制被 Git 忽略的本地配置文件，并只在
+自己的编辑器中填写：
+
+```bash
+cp .env.example .env.local
+# 在本机编辑 .env.local，填写 DEEPSEEK_API_KEY；不要提交该文件
+
+pnpm db:migrate
+pnpm run:ai -- --report-date 2026-08-04 --edition ai-replay-v1 --dry-run
+```
+
+`DEEPSEEK_BASE_URL` 必须是 API 根地址，不能包含 `/chat/completions`。默认模型可通过
+`DEEPSEEK_MODEL` 替换。结构化输出使用 AI SDK `Output.object` 和 Zod 校验；模型只能引用输入
+Evidence 的 ID，最终 Markdown 中的来源 URL 由程序从 Evidence 确定性生成。根命令会自动读取
+可选的 `.env.local`；已经在 shell 中导出的环境变量也仍然可用。
+
+模型适配器关闭了隐藏的 HTTP 自动重试；每次结构化输出最多额外进行一次显式恢复调用，并记录在
+`modelUsage` 中。当前模型调用仍是 at-least-once：如果进程在模型返回后、LangGraph checkpoint
+前退出，恢复时可能再次调用并计费。生产级硬成本上限需要后续增加独立的持久化 Model Call Ledger。
 
 ## Workspace
 
@@ -112,6 +137,7 @@ docs/                    技术方案
 pnpm demo          # 构建并执行离线 Demo
 pnpm db:migrate    # 执行 PostgreSQL 版本化迁移
 pnpm run:fixture   # 执行/恢复持久化 Fixture Run
+pnpm run:ai       # 使用真实 DeepSeek 模型和合成回放证据
 pnpm studio        # 启动本地 Agent Server 和 Studio
 pnpm build         # 构建所有 workspace packages
 pnpm typecheck     # TypeScript 类型检查
@@ -131,9 +157,10 @@ pnpm check         # 完整 CI 检查
 - [x] Run/Stage/Artifact/Delivery 持久化 Runtime
 - [x] 重复触发幂等、失败恢复、发布门禁和审计查询
 - [x] PostgreSQL LangGraph durable checkpoint
+- [x] DeepSeek 结构化编辑/审核、版本化 Prompt 和回放模式
 - [x] 单元测试与 CI
-- [ ] 真实模型、MCP 来源和飞书配置
-- [ ] 业务 Prompt、评测集与长期记忆实现
+- [ ] 实时 MCP 来源和飞书配置
+- [ ] 在线评测基线与长期记忆实现
 
 当前代码分层、运行流程和目录职责见
 [当前架构与目录说明](docs/architecture.md)；完整目标方案见

@@ -188,18 +188,20 @@ export class RunExecutor {
           stage: RuntimeStage.AgentGraph,
           inputHash: requestHash,
           execute: async () =>
-            created.created
-              ? this.workflow.start({
-                  runId: run.id,
-                  topic: run.topic,
-                  maxRevisions: run.maxRevisions,
-                })
-              : this.workflow.resume({
-                  runId: run.id,
-                  topic: run.topic,
-                  maxRevisions: run.maxRevisions,
-                }),
-          serialize: (value) => toJsonValue(value),
+            AgentGraphStateValueSchema.parse(
+              await (created.created
+                ? this.workflow.start({
+                    runId: run.id,
+                    topic: run.topic,
+                    maxRevisions: run.maxRevisions,
+                  })
+                : this.workflow.resume({
+                    runId: run.id,
+                    topic: run.topic,
+                    maxRevisions: run.maxRevisions,
+                  })),
+            ),
+          serialize: (value) => toJsonValue(AgentGraphStateValueSchema.parse(value)),
           deserialize: (value) => AgentGraphStateValueSchema.parse(value),
           outputRefs: { checkpointThreadId: run.id },
         });

@@ -19,20 +19,57 @@ export interface ModelRequest {
   system: string;
   prompt: string;
   maxOutputTokens?: number;
+  temperature?: number;
+  timeoutMs?: number;
+  maxRetries?: number;
 }
 
 export interface ModelResponse {
   text: string;
   model: string;
+  finishReason?: string;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
+    totalTokens?: number;
   };
 }
 
 export interface ModelProvider {
   readonly manifest: PluginManifest;
   generate(request: ModelRequest): Promise<ModelResponse>;
+}
+
+export interface StructuredModelRequest<OUTPUT> extends ModelRequest {
+  schema: z.ZodType<OUTPUT>;
+  schemaName: string;
+  schemaDescription?: string;
+}
+
+export interface StructuredModelResponse<OUTPUT> {
+  value: OUTPUT;
+  model: string;
+  finishReason: string;
+  usage?: ModelResponse["usage"];
+}
+
+/** Optional extension for providers that support schema-constrained JSON output. */
+export interface StructuredModelProvider extends ModelProvider {
+  generateStructured<OUTPUT>(
+    request: StructuredModelRequest<OUTPUT>,
+  ): Promise<StructuredModelResponse<OUTPUT>>;
+}
+
+/** Indicates that a provider returned empty, truncated, or schema-invalid structured output. */
+export class StructuredModelOutputError extends Error {
+  override readonly name = "StructuredModelOutputError";
+
+  readonly usage: ModelResponse["usage"] | undefined;
+
+  constructor(message: string, options: { cause?: unknown; usage?: ModelResponse["usage"] } = {}) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.usage = options.usage;
+  }
 }
 
 export interface ToolDescriptor {

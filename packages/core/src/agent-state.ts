@@ -1,27 +1,52 @@
 import { ReducedValue, StateSchema } from "@langchain/langgraph";
 import { z } from "zod";
 
-export const EvidenceSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  url: z.string(),
-  excerpt: z.string(),
-});
+export const AgentEntityIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+
+export const EvidenceSchema = z
+  .object({
+    id: AgentEntityIdSchema,
+    title: z.string().min(1).max(300),
+    url: z
+      .string()
+      .url()
+      .refine(
+        isSafeEvidenceUrl,
+        "Evidence URLs must be safe HTTP(S) URLs without credentials or control characters.",
+      ),
+    excerpt: z.string().min(1).max(4000),
+  })
+  .strict();
 
 export type Evidence = z.infer<typeof EvidenceSchema>;
 
-export const StorySchema = z.object({
-  id: z.string(),
-  headline: z.string(),
-  whyItMatters: z.string(),
-  evidenceIds: z.array(z.string()),
-});
+export const StorySchema = z
+  .object({
+    id: AgentEntityIdSchema,
+    headline: z.string().min(1),
+    whyItMatters: z.string().min(1),
+    evidenceIds: z.array(AgentEntityIdSchema),
+  })
+  .strict();
 
 export type Story = z.infer<typeof StorySchema>;
 
 export const ReviewRouteSchema = z.enum(["research", "revise"]);
 
 export type ReviewRoute = z.infer<typeof ReviewRouteSchema>;
+
+export const ModelUsageSchema = z.object({
+  requests: z.number().int().nonnegative().default(0),
+  inputTokens: z.number().int().nonnegative().default(0),
+  outputTokens: z.number().int().nonnegative().default(0),
+  totalTokens: z.number().int().nonnegative().default(0),
+});
+
+export type ModelUsage = z.infer<typeof ModelUsageSchema>;
 
 export const AgentGraphStateValueSchema = z.object({
   runId: z.string(),
@@ -35,6 +60,12 @@ export const AgentGraphStateValueSchema = z.object({
   approved: z.boolean().default(false),
   reviewRoute: ReviewRouteSchema.default("revise"),
   revisionCount: z.number().int().nonnegative().default(0),
+  modelUsage: ModelUsageSchema.default(() => ({
+    requests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+  })),
   trace: z.array(z.string()).default(() => []),
 });
 
@@ -50,6 +81,14 @@ export const AgentGraphState = new StateSchema({
   approved: AgentGraphStateValueSchema.shape.approved,
   reviewRoute: AgentGraphStateValueSchema.shape.reviewRoute,
   revisionCount: AgentGraphStateValueSchema.shape.revisionCount,
+  modelUsage: new ReducedValue(AgentGraphStateValueSchema.shape.modelUsage, {
+    reducer: (current, update) => ({
+      requests: current.requests + update.requests,
+      inputTokens: current.inputTokens + update.inputTokens,
+      outputTokens: current.outputTokens + update.outputTokens,
+      totalTokens: current.totalTokens + update.totalTokens,
+    }),
+  }),
   trace: new ReducedValue(AgentGraphStateValueSchema.shape.trace, {
     reducer: (current, update) => current.concat(update),
   }),
@@ -57,3 +96,24 @@ export const AgentGraphState = new StateSchema({
 
 export type AgentGraphStateValue = typeof AgentGraphState.State;
 export type AgentGraphStateUpdate = typeof AgentGraphState.Update;
+
+export function isSafeEvidenceUrl(value: string): boolean {
+  let parsed: URL;
+
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+
+  return (
+    (parsed.protocol === "https:" || parsed.protocol === "http:") &&
+    parsed.username.length === 0 &&
+    parsed.password.length === 0 &&
+    !/[<>\s]/.test(value) &&
+    !Array.from(value).some((character) => {
+      const codePoint = character.codePointAt(0);
+      return codePoint !== undefined && (codePoint <= 0x1f || codePoint === 0x7f);
+    })
+  );
+}

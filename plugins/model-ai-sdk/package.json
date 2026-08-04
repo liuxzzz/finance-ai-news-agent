@@ -16,10 +16,16 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@ai-sdk/deepseek": "3.0.15",
     "@finance-ai-news-agent/plugin-sdk": "workspace:*",
     "ai": "7.0.41"
+  },
+  "devDependencies": {
+    "vitest": "4.0.18",
+    "zod": "4.4.3"
   }
 }

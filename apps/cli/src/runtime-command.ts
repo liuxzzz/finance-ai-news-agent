@@ -107,7 +107,7 @@ export async function showRunStatus(runId: string | undefined): Promise<void> {
   }
 }
 
-interface RunCommandOptions {
+export interface RunCommandOptions {
   tenantId: string;
   reportDate: string;
   edition: string;
@@ -117,7 +117,14 @@ interface RunCommandOptions {
   dryRun: boolean;
 }
 
-function parseRunOptions(args: string[]): RunCommandOptions {
+export interface RunOptionDefaults {
+  edition?: string;
+}
+
+export function parseRunOptions(
+  args: string[],
+  defaults: RunOptionDefaults = {},
+): RunCommandOptions {
   const timezone = process.env.AGENT_TIMEZONE ?? "Asia/Shanghai";
   const values = new Map<string, string>();
   const valueOptions = new Set([
@@ -169,7 +176,7 @@ function parseRunOptions(args: string[]): RunCommandOptions {
   return {
     tenantId: values.get("--tenant") ?? "default",
     reportDate: values.get("--report-date") ?? currentDateInTimezone(timezone),
-    edition: values.get("--edition") ?? "daily",
+    edition: values.get("--edition") ?? defaults.edition ?? "daily",
     topic: values.get("--topic") ?? "Finance & AI",
     maxRevisions,
     timezone,
@@ -195,17 +202,17 @@ function currentDateInTimezone(timezone: string): string {
   return `${year}-${month}-${day}`;
 }
 
-function requireDatabaseUrl(): string {
+export function requireDatabaseUrl(): string {
   const databaseUrl = process.env.DATABASE_URL;
 
   if (databaseUrl === undefined || databaseUrl.trim().length === 0) {
-    throw new Error("DATABASE_URL is required for migrate, run, and status commands.");
+    throw new Error("DATABASE_URL is required for migrate, run, run-ai, and status commands.");
   }
 
   return databaseUrl;
 }
 
-function projectRoot(): string {
+export function projectRoot(): string {
   return resolve(process.env.INIT_CWD ?? process.cwd());
 }
 
