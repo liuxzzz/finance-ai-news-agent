@@ -167,12 +167,35 @@ describe("run executor", () => {
     expect(output.calls).toHaveLength(1);
     expect(deliveryStages.map((stage) => stage.status)).toEqual(["skipped", "succeeded"]);
   });
+
+  it("persists approved story memory once before rendering the artifact", async () => {
+    const store = new InMemoryRuntimeStore();
+    const workflow: AgentWorkflow = {
+      start: vi.fn(async (input) => approvedState(input.runId)),
+      resume: vi.fn(async (input) => approvedState(input.runId)),
+    };
+    const persistMemory = vi.fn(async () => ({ events: 1 }));
+    const executor = createExecutor(store, workflow, undefined, persistMemory);
+
+    const first = await executor.execute({ ...request, dryRun: true });
+    await executor.execute({ ...request, dryRun: true });
+    const stages = await store.listStages(first.run.id);
+
+    expect(persistMemory).toHaveBeenCalledTimes(1);
+    expect(stages.find((stage) => stage.stage === RuntimeStage.PersistMemory)?.status).toBe(
+      "succeeded",
+    );
+    expect(stages.findIndex((stage) => stage.stage === RuntimeStage.PersistMemory)).toBeLessThan(
+      stages.findIndex((stage) => stage.stage === RuntimeStage.PersistArtifact),
+    );
+  });
 });
 
 function createExecutor(
   store: InMemoryRuntimeStore,
   workflow: AgentWorkflow,
   output?: OutputPlugin,
+  persistMemory?: NonNullable<ConstructorParameters<typeof RunExecutor>[0]["persistMemory"]>,
 ): RunExecutor {
   let id = 0;
 
@@ -184,6 +207,7 @@ function createExecutor(
       content: `# Digest\n\n${state.draft}`,
     }),
     ...(output === undefined ? {} : { output }),
+    ...(persistMemory === undefined ? {} : { persistMemory }),
     deliveryTarget: ".artifacts/test.md",
     now: () => new Date("2026-08-04T00:00:00.000Z"),
     generateId: () => `id-${++id}`,

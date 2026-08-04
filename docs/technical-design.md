@@ -562,8 +562,12 @@ interface MemoryService {
   - RSS/API 原始响应、来源、工具名、调用参数摘要、采集时间
 - `normalized_items`
   - 统一字段、canonical URL、指纹、embedding、信任级别
+- `normalized_content_items`（当前 MVP 实现）
+  - Run 内 Evidence、canonical URL、内容/标题指纹、跨源 cluster 与发布时间
 - `stories`
   - 事件标题、主题、状态、首次/最近出现时间、embedding
+- `story_events`、`story_event_updates`（当前 MVP 实现）
+  - 审核后 Story 的跨日事件身份、首次/最近出现日期、更新次数与每次 Evidence 引用
 - `story_items`
   - Story 与条目的多对多关系、是否为主要证据
 - `story_scores`

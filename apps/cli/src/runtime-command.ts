@@ -100,21 +100,33 @@ export async function showRunStatus(
       throw new Error(`Run ${runId} was not found.`);
     }
 
-    const [stages, deliveries, modelCalls, sourceRuns, rawSourceItems, normalizedContentItems] =
-      await Promise.all([
-        store.listStages(run.id),
-        store.listDeliveries(run.id),
-        store.listModelCalls(run.id),
-        store.listSourceRuns(run.id),
-        store.listRawSourceItems(run.id),
-        store.listNormalizedContentItems(run.id),
-      ]);
+    const [
+      stages,
+      deliveries,
+      modelCalls,
+      sourceRuns,
+      rawSourceItems,
+      normalizedContentItems,
+      storyEvents,
+      storyEventUpdates,
+    ] = await Promise.all([
+      store.listStages(run.id),
+      store.listDeliveries(run.id),
+      store.listModelCalls(run.id),
+      store.listSourceRuns(run.id),
+      store.listRawSourceItems(run.id),
+      store.listNormalizedContentItems(run.id),
+      store.listStoryEventsForRun(run.id),
+      store.listStoryEventUpdates(run.id),
+    ]);
     const detail = {
       run,
       stages,
       sourceRuns,
       rawSourceItems,
       normalizedContentItems,
+      storyEvents,
+      storyEventUpdates,
       modelCalls,
       deliveries,
     };
@@ -141,6 +153,9 @@ export async function showRunStatus(
         `Sources: ${sourceRuns.map((source) => `${source.sourceId}:${source.status}`).join(", ") || "none"}`,
         `Raw items: ${rawSourceItems.length}`,
         `Normalized evidence: ${normalizedContentItems.length}`,
+        `Story events: ${storyEvents.length}`,
+        `Event updates: ${storyEventUpdates.length}`,
+        `Ongoing events: ${storyEvents.filter((event) => event.updateCount > 1).length}`,
         `Evidence by source: ${[...sourceCounts.entries()].map(([source, count]) => `${source}=${count}`).join(", ") || "none"}`,
         `Model calls: ${modelCalls.length}`,
         `Model tokens: ${modelCalls.reduce((total, call) => total + call.totalTokens, 0)}`,

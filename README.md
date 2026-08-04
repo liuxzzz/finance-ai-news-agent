@@ -4,7 +4,8 @@
 领域的信息，完成整理、简报输出和记忆沉淀。
 
 当前仓库已具备可运行的每日简报闭环：36氪、虎嗅和 InfoQ RSS 实时采集、跨源与跨日去重、
-DeepSeek 编辑审核、PostgreSQL Runtime、Artifact 持久化、飞书机器人幂等发送、每日调度和运维检查。
+DeepSeek 编辑审核、事件进展时间线、PostgreSQL Runtime、Artifact 持久化、飞书机器人幂等发送、
+每日调度和运维检查。
 
 ## 项目原则
 
@@ -128,6 +129,7 @@ RSS_MAX_EXCERPT_CHARS=600
 RSS_MAX_EVIDENCE=12
 RSS_MAX_CANDIDATE_EVIDENCE=24
 HISTORY_DEDUP_LOOKBACK_DAYS=7
+STORY_EVENT_LOOKBACK_DAYS=30
 
 pnpm db:migrate
 pnpm run:live -- --report-date 2026-08-04 --edition daily --dry-run
@@ -135,8 +137,9 @@ pnpm run:live -- --report-date 2026-08-04 --edition daily --dry-run
 
 Feed 必须使用 HTTPS，本地 loopback 测试可以使用 HTTP。模型只能传入 `query` 与 `limit`，不能
 指定任意 URL。每个来源的成功、失败和原始条目分别写入 `source_runs` 与 `raw_source_items`；候选
-内容会清理追踪参数、生成内容指纹、跨源聚类，并与最近 7 天成功 Run 比较后再均衡选取。RSS 条目
-会被转换成以下结构后才可进入 Agent Evidence：
+内容会清理追踪参数、生成内容指纹、跨源聚类，并与最近 7 天成功 Run 比较后再均衡选取。审核通过的
+stories 会在独立的可恢复阶段与最近 30 天事件匹配，形成首次出现、最近更新和更新次数时间线。RSS
+条目会被转换成以下结构后才可进入 Agent Evidence：
 
 ```json
 {
@@ -267,13 +270,14 @@ pnpm check         # 完整 CI 检查
 - [x] DeepSeek Function Calling、RSS 实时采集和 `run-live` 入口
 - [x] 原始来源审计、标准化、跨源去重、聚类与来源均衡
 - [x] 最近 7 天历史去重和可追溯内容持久化
+- [x] 审核后 Story 事件匹配、跨日进展时间线和幂等更新
 - [x] 飞书机器人真实发送、20KB 门禁和 Runtime 发送幂等
 - [x] macOS 每日调度、失败退避、健康检查和运行指标
 - [x] Docker 一次性 Worker 部署入口
 - [x] 单元测试与 CI
 - [x] 36氪、虎嗅和 InfoQ RSS 真实网络拉取冒烟验收
 - [ ] 扩展更多专业金融/AI RSS/API 来源
-- [ ] 语义事件进展记忆、用户偏好、反馈和在线评测基线
+- [ ] 向量语义检索、用户偏好、反馈和在线评测基线
 
 当前代码分层、运行流程和目录职责见
 [当前架构与目录说明](docs/architecture.md)；完整目标方案见

@@ -206,8 +206,10 @@ Research Provider。模型只产生 `search_news` 的关键词与数量；Gatewa
 | `StructuredModelProvider`  | 使用 Zod Schema 约束 JSON 业务输出                          | DeepSeek + AI SDK `Output.object` 已接入 `run-ai` |
 | `ToolCallingModelProvider` | 返回函数调用意图但不在 Provider 内执行工具                  | DeepSeek + AI SDK 已实现并通过协议测试            |
 | `ToolGateway`              | 列出允许的内部/外部工具并执行结构化调用                     | `source-rss` 已接入默认实时链路                   |
-| `MemoryPort`               | 搜索记忆和提交记忆候选                                      | 已定义接口；暂无实现                              |
-| `OutputPlugin`             | 按稳定 `deliveryKey` 幂等发送并返回回执                     | `output-file` 已实现并通过幂等契约测试            |
+| `MemoryPort`               | 搜索向量记忆和提交记忆候选                                  | 已定义接口；向量实现待扩展                        |
+| `ContentStore`             | 保存标准化 Evidence 并检查近期重复                          | PostgreSQL 已实现                                 |
+| `StoryMemoryStore`         | 保存审核后 Story 的事件身份和跨日更新时间线                 | PostgreSQL 已实现                                 |
+| `OutputPlugin`             | 按稳定 `deliveryKey` 幂等发送并返回回执                     | 文件与飞书机器人均已实现并通过验收                |
 | `RuntimeStore`             | 持久化 Run、Stage、Artifact、Delivery 和运行锁              | PostgreSQL 与内存实现均已接入                     |
 
 `PluginKindSchema` 预留了 `model`、`embedding`、`source`、`storage` 和 `output`
@@ -330,19 +332,19 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 
 ## 8. 当前完成度与目标架构的差距
 
-| 能力                 | 当前状态                                | 下一步接线位置                     |
-| -------------------- | --------------------------------------- | ---------------------------------- |
-| 三节点编排与有限修订 | 已实现                                  | 接入真实 `ModelProvider` Handler   |
-| 离线研究闭环         | 已实现                                  | `apps/cli/src/demo.ts`             |
-| 本地文件输出         | 已实现                                  | `plugins/output-file`              |
-| 真实模型调用         | DeepSeek 已组装并完成冒烟验收           | 增加评测基线与更多模型 Provider    |
-| RSS 新闻采集         | 三个 Feed、来源审计与失败隔离已实现     | 增加更多专业金融/AI Feed           |
-| PostgreSQL Runtime   | Run/Stage、来源、内容、锁和恢复已实现   | 后续扩展语义记忆表                 |
-| 长期记忆             | 已实现 7 天精确历史去重                 | 增加事件进展、向量检索、偏好与反馈 |
-| 业务 Prompt/Preset   | 目录占位                                | `prompts/`、`presets/finance-ai/`  |
-| 运行幂等、审计、恢复 | 已实现并通过真实 PostgreSQL 验收        | 继续扩展告警与基线对比             |
-| 飞书输出             | 已实现并完成真实发送与重复触发验收      | 增加交互卡片等可选渲染器           |
-| 调度、部署与观测     | launchd、Docker、health、metrics 已实现 | 增加云告警和托管部署示例           |
+| 能力                 | 当前状态                                  | 下一步接线位置                    |
+| -------------------- | ----------------------------------------- | --------------------------------- |
+| 三节点编排与有限修订 | 已实现                                    | 接入真实 `ModelProvider` Handler  |
+| 离线研究闭环         | 已实现                                    | `apps/cli/src/demo.ts`            |
+| 本地文件输出         | 已实现                                    | `plugins/output-file`             |
+| 真实模型调用         | DeepSeek 已组装并完成冒烟验收             | 增加评测基线与更多模型 Provider   |
+| RSS 新闻采集         | 三个 Feed、来源审计与失败隔离已实现       | 增加更多专业金融/AI Feed          |
+| PostgreSQL Runtime   | Run/Stage、来源、内容、锁和恢复已实现     | 后续扩展语义记忆表                |
+| 长期记忆             | 已实现精确历史去重与 Story 事件进展时间线 | 增加向量检索、偏好与反馈          |
+| 业务 Prompt/Preset   | 目录占位                                  | `prompts/`、`presets/finance-ai/` |
+| 运行幂等、审计、恢复 | 已实现并通过真实 PostgreSQL 验收          | 继续扩展告警与基线对比            |
+| 飞书输出             | 已实现并完成真实发送与重复触发验收        | 增加交互卡片等可选渲染器          |
+| 调度、部署与观测     | launchd、Docker、health、metrics 已实现   | 增加云告警和托管部署示例          |
 
 在继续开发时，应优先保持现有边界：Core 只表达流程与领域状态，第三方能力通过 Plugin SDK
 接入，CLI/Runtime 负责组装，Preset 和 Prompt 负责领域差异。

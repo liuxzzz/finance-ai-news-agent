@@ -9,4 +9,4 @@ export {
   type CreatePostgresCheckpointerOptions,
 } from "./checkpointer.js";
 export { runPostgresMigrations, type RunPostgresMigrationsOptions } from "./migrations.js";
-export { PostgresRuntimeStore } from "./runtime-store.js";
+export { PostgresRuntimeStore, storyHeadlineSimilarity } from "./runtime-store.js";

@@ -30,7 +30,13 @@ export {
 
 export { InMemoryRuntimeStore } from "./in-memory-runtime-store.js";
 
-export { canonicalizeEvidenceUrl, normalizeAndClusterEvidence } from "./evidence-normalizer.js";
+export {
+  canonicalizeEvidenceUrl,
+  headlineFingerprint,
+  normalizeAndClusterEvidence,
+  normalizeHeadline,
+  selectBalancedEvidence,
+} from "./evidence-normalizer.js";
 
 export {
   CURATE_WRITE_PROMPT_V1,
@@ -66,6 +72,7 @@ export {
   RuntimeStage,
   type ArtifactRenderer,
   type ExecuteRunRequest,
+  type MemoryPersister,
   type RenderedArtifactContent,
   type RunDisposition,
   type RunExecutionResult,

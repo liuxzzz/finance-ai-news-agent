@@ -19,6 +19,7 @@ import type { AgentWorkflow } from "./agent-workflow.js";
 
 export const RuntimeStage = {
   AgentGraph: "agent_graph",
+  PersistMemory: "persist_memory",
   PersistArtifact: "persist_artifact",
   Deliver: "deliver",
 } as const;
@@ -43,6 +44,11 @@ export type ArtifactRenderer = (
   run: RunRecord,
 ) => RenderedArtifactContent | Promise<RenderedArtifactContent>;
 
+export type MemoryPersister = (
+  state: AgentGraphStateValue,
+  run: RunRecord,
+) => JsonValue | Promise<JsonValue>;
+
 export interface RunExecutorOptions {
   store: RuntimeStore;
   workflow: AgentWorkflow;
@@ -51,6 +57,8 @@ export interface RunExecutorOptions {
   deliveryTarget?: string;
   artifactKind?: string;
   artifactVersion?: string;
+  persistMemory?: MemoryPersister;
+  memoryVersion?: string;
   now?: () => Date;
   generateId?: () => string;
 }
@@ -97,6 +105,8 @@ export class RunExecutor {
   private readonly deliveryTarget: string;
   private readonly artifactKind: string;
   private readonly artifactVersion: string;
+  private readonly persistMemory: MemoryPersister | undefined;
+  private readonly memoryVersion: string;
   private readonly now: () => Date;
   private readonly generateId: () => string;
 
@@ -108,6 +118,8 @@ export class RunExecutor {
     this.deliveryTarget = options.deliveryTarget ?? options.output?.manifest.id ?? "none";
     this.artifactKind = options.artifactKind ?? "digest";
     this.artifactVersion = options.artifactVersion ?? "v1";
+    this.persistMemory = options.persistMemory;
+    this.memoryVersion = options.memoryVersion ?? "v1";
     this.now = options.now ?? (() => new Date());
     this.generateId = options.generateId ?? randomUUID;
   }
@@ -119,6 +131,7 @@ export class RunExecutor {
       runtime: {
         artifactKind: this.artifactKind,
         artifactVersion: this.artifactVersion,
+        memoryVersion: this.persistMemory === undefined ? null : this.memoryVersion,
         outputPluginId: this.output?.manifest.id ?? null,
         outputPluginVersion: this.output?.manifest.version ?? null,
         deliveryTarget: this.deliveryTarget,
@@ -221,6 +234,29 @@ export class RunExecutor {
             artifact: null,
             delivery: null,
           };
+        }
+
+        if (this.persistMemory !== undefined) {
+          const memoryInputHash = hashJson(
+            toJsonValue({
+              stories: state.stories,
+              evidence: state.evidence.map((item) => ({
+                id: item.id,
+                fingerprint: item.fingerprint ?? null,
+                clusterId: item.clusterId ?? null,
+              })),
+              memoryVersion: this.memoryVersion,
+            }),
+          );
+          await this.executeStage({
+            runId: run.id,
+            stage: RuntimeStage.PersistMemory,
+            inputHash: memoryInputHash,
+            execute: async () => this.persistMemory!(state, run),
+            serialize: (value) => value,
+            deserialize: (value) => value,
+            outputRefs: { memoryVersion: this.memoryVersion },
+          });
         }
 
         const artifactInputHash = hashJson(

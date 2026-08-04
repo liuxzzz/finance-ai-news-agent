@@ -33,7 +33,7 @@ export function normalizeAndClusterEvidence(evidence: readonly Evidence[], limit
   const unique: Array<{ item: Evidence; canonicalUrl: string; normalizedTitle: string }> = [];
 
   for (const candidate of ordered) {
-    const normalizedTitle = normalizeTitle(candidate.item.title);
+    const normalizedTitle = normalizeHeadline(candidate.item.title);
 
     if (seenUrls.has(candidate.canonicalUrl) || seenTitles.has(normalizedTitle)) {
       continue;
@@ -69,6 +69,18 @@ export function normalizeAndClusterEvidence(evidence: readonly Evidence[], limit
       clusterId,
     });
   });
+}
+
+export function normalizeHeadline(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("zh-CN")
+    .replace(/[^\p{L}\p{N}]+/gu, "")
+    .trim();
+}
+
+export function headlineFingerprint(value: string): string {
+  return hashText(normalizeHeadline(value));
 }
 
 /** Selects evidence round-robin by source while preserving each source's ranking order. */
@@ -123,14 +135,6 @@ export function canonicalizeEvidenceUrl(value: string): string {
 
   url.searchParams.sort();
   return url.toString();
-}
-
-function normalizeTitle(value: string): string {
-  return value
-    .normalize("NFKC")
-    .toLocaleLowerCase("zh-CN")
-    .replace(/[^\p{L}\p{N}]+/gu, "")
-    .trim();
 }
 
 function titleSimilarity(left: string, right: string): number {

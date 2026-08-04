@@ -120,6 +120,15 @@ export {
   type PreviouslySeenContentRecord,
 } from "./content-store.js";
 
+export {
+  type SaveStoryEventUpdatesInput,
+  type SavedStoryEventUpdate,
+  type StoryEventInput,
+  type StoryEventRecord,
+  type StoryEventUpdateRecord,
+  type StoryMemoryStore,
+} from "./story-memory-store.js";
+
 export interface ToolCallingModelRequest extends ModelRequest {
   tools: ToolDescriptor[];
   toolChoice?: "auto" | "required" | "none";

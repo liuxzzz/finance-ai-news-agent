@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type {
   ArtifactRecord,
@@ -35,6 +35,8 @@ import type {
   RawSourceItemRecord,
   RecordSourceCollectionInput,
   SaveArtifactInput,
+  SaveStoryEventUpdatesInput,
+  SavedStoryEventUpdate,
   SerializedError,
   SkipRunStageInput,
   StartDeliveryInput,
@@ -42,6 +44,9 @@ import type {
   StartModelCallInput,
   StartModelCallResult,
   StartRunStageInput,
+  StoryEventRecord,
+  StoryEventUpdateRecord,
+  StoryMemoryStore,
 } from "@finance-ai-news-agent/plugin-sdk";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
@@ -86,8 +91,20 @@ const NORMALIZED_CONTENT_COLUMNS = `
   excerpt, published_at, fingerprint, title_fingerprint, cluster_id, created_at
 `;
 
+const STORY_EVENT_COLUMNS = `
+  id, tenant_id, topic, canonical_headline, normalized_headline,
+  title_fingerprint, latest_headline, first_seen_date, last_seen_date,
+  first_run_id, latest_run_id, update_count, created_at, updated_at
+`;
+
+const STORY_EVENT_UPDATE_COLUMNS = `
+  id, event_id, run_id, story_id, headline, evidence_ids, observed_at, created_at
+`;
+
 /** PostgreSQL implementation of the deterministic runtime persistence boundary. */
-export class PostgresRuntimeStore implements RuntimeStore, SourceAuditStore, ContentStore {
+export class PostgresRuntimeStore
+  implements RuntimeStore, SourceAuditStore, ContentStore, StoryMemoryStore
+{
   constructor(private readonly pool: Pool) {}
 
   async createOrGetRun(input: CreateRunInput): Promise<CreateRunResult> {
@@ -959,6 +976,195 @@ export class PostgresRuntimeStore implements RuntimeStore, SourceAuditStore, Con
     }));
   }
 
+  async saveStoryEventUpdates(input: SaveStoryEventUpdatesInput): Promise<SavedStoryEventUpdate[]> {
+    if (
+      !Number.isSafeInteger(input.lookbackDays) ||
+      input.lookbackDays < 1 ||
+      input.lookbackDays > 365
+    ) {
+      throw new Error("Story event lookback must be an integer from 1 to 365 days.");
+    }
+
+    if (input.stories.length === 0) {
+      return [];
+    }
+
+    return withTransaction(this.pool, async (client) => {
+      const runResult = await client.query<{
+        tenant_id: string;
+        report_date: string;
+        topic: string;
+      }>("SELECT tenant_id, report_date, topic FROM runs WHERE id = $1", [input.runId]);
+      const run = requireRow(runResult.rows[0], "Story memory run lookup");
+      const candidates = await client.query<StoryEventRow>(
+        `
+          SELECT ${STORY_EVENT_COLUMNS}
+          FROM story_events
+          WHERE tenant_id = $1
+            AND topic = $2
+            AND last_seen_date >= $3::date - $4::integer
+          ORDER BY last_seen_date DESC, id ASC
+          LIMIT 500
+        `,
+        [run.tenant_id, run.topic, run.report_date, input.lookbackDays],
+      );
+      const availableEvents = candidates.rows.map(mapStoryEvent);
+      const saved: SavedStoryEventUpdate[] = [];
+
+      for (const story of input.stories) {
+        let event = bestStoryEventMatch(
+          availableEvents,
+          story.normalizedHeadline,
+          story.titleFingerprint,
+        );
+        let isNewEvent = false;
+
+        if (event === null) {
+          const eventId = storyEventId(run.tenant_id, run.topic, story.titleFingerprint);
+          const inserted = await client.query<StoryEventRow>(
+            `
+              INSERT INTO story_events (
+                id, tenant_id, topic, canonical_headline, normalized_headline,
+                title_fingerprint, latest_headline, first_seen_date, last_seen_date,
+                first_run_id, latest_run_id, update_count, created_at, updated_at
+              )
+              VALUES (
+                $1, $2, $3, $4, $5,
+                $6, $4, $7::date, $7::date,
+                $8, $8, 0, $9, $9
+              )
+              ON CONFLICT (tenant_id, topic, title_fingerprint) DO NOTHING
+              RETURNING ${STORY_EVENT_COLUMNS}
+            `,
+            [
+              eventId,
+              run.tenant_id,
+              run.topic,
+              story.headline,
+              story.normalizedHeadline,
+              story.titleFingerprint,
+              run.report_date,
+              input.runId,
+              input.observedAt,
+            ],
+          );
+
+          if (inserted.rows[0] !== undefined) {
+            event = mapStoryEvent(inserted.rows[0]);
+            availableEvents.push(event);
+            isNewEvent = true;
+          } else {
+            const existing = await client.query<StoryEventRow>(
+              `
+                SELECT ${STORY_EVENT_COLUMNS}
+                FROM story_events
+                WHERE tenant_id = $1 AND topic = $2 AND title_fingerprint = $3
+              `,
+              [run.tenant_id, run.topic, story.titleFingerprint],
+            );
+            event = mapStoryEvent(requireRow(existing.rows[0], "Story event conflict lookup"));
+          }
+        }
+
+        const updateId = storyEventUpdateId(input.runId, story.storyId);
+        const insertedUpdate = await client.query<StoryEventUpdateRow>(
+          `
+            INSERT INTO story_event_updates (
+              id, event_id, run_id, story_id, headline, evidence_ids, observed_at, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $7)
+            ON CONFLICT (run_id, story_id) DO NOTHING
+            RETURNING ${STORY_EVENT_UPDATE_COLUMNS}
+          `,
+          [
+            updateId,
+            event.id,
+            input.runId,
+            story.storyId,
+            story.headline,
+            encodeJson([...story.evidenceIds]),
+            input.observedAt,
+          ],
+        );
+        const isNewUpdate = insertedUpdate.rows[0] !== undefined;
+        let update: StoryEventUpdateRecord;
+
+        if (isNewUpdate) {
+          update = mapStoryEventUpdate(insertedUpdate.rows[0]!);
+          const updatedEvent = await client.query<StoryEventRow>(
+            `
+              UPDATE story_events
+              SET
+                latest_headline = CASE WHEN $3::date >= last_seen_date THEN $2 ELSE latest_headline END,
+                first_seen_date = LEAST(first_seen_date, $3::date),
+                last_seen_date = GREATEST(last_seen_date, $3::date),
+                first_run_id = CASE WHEN $3::date < first_seen_date THEN $4 ELSE first_run_id END,
+                latest_run_id = CASE WHEN $3::date >= last_seen_date THEN $4 ELSE latest_run_id END,
+                update_count = update_count + 1,
+                updated_at = GREATEST(updated_at, $5::timestamptz)
+              WHERE id = $1
+              RETURNING ${STORY_EVENT_COLUMNS}
+            `,
+            [event.id, story.headline, run.report_date, input.runId, input.observedAt],
+          );
+          event = mapStoryEvent(requireRow(updatedEvent.rows[0], "Story event update"));
+          const candidateIndex = availableEvents.findIndex(
+            (candidate) => candidate.id === event!.id,
+          );
+
+          if (candidateIndex >= 0) {
+            availableEvents[candidateIndex] = event;
+          }
+        } else {
+          const existingUpdate = await client.query<StoryEventUpdateRow>(
+            `
+              SELECT ${STORY_EVENT_UPDATE_COLUMNS}
+              FROM story_event_updates
+              WHERE run_id = $1 AND story_id = $2
+            `,
+            [input.runId, story.storyId],
+          );
+          update = mapStoryEventUpdate(
+            requireRow(existingUpdate.rows[0], "Story event update conflict lookup"),
+          );
+        }
+
+        saved.push({ event, update, isNewEvent, isNewUpdate });
+      }
+
+      return saved;
+    });
+  }
+
+  async listStoryEventUpdates(runId: string): Promise<StoryEventUpdateRecord[]> {
+    const result = await this.pool.query<StoryEventUpdateRow>(
+      `
+        SELECT ${STORY_EVENT_UPDATE_COLUMNS}
+        FROM story_event_updates
+        WHERE run_id = $1
+        ORDER BY observed_at ASC, story_id ASC
+      `,
+      [runId],
+    );
+    return result.rows.map(mapStoryEventUpdate);
+  }
+
+  async listStoryEventsForRun(runId: string): Promise<StoryEventRecord[]> {
+    const result = await this.pool.query<StoryEventRow>(
+      `
+        SELECT DISTINCT ${STORY_EVENT_COLUMNS.split(",")
+          .map((column) => `event.${column.trim()}`)
+          .join(", ")}
+        FROM story_events AS event
+        JOIN story_event_updates AS update ON update.event_id = event.id
+        WHERE update.run_id = $1
+        ORDER BY event.last_seen_date DESC, event.id ASC
+      `,
+      [runId],
+    );
+    return result.rows.map(mapStoryEvent);
+  }
+
   private async requireUpdatedStage(
     stageId: string,
     row: StageRow | undefined,
@@ -1231,6 +1437,116 @@ function normalizedContentMatches(
   );
 }
 
+function mapStoryEvent(row: StoryEventRow): StoryEventRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    topic: row.topic,
+    canonicalHeadline: row.canonical_headline,
+    normalizedHeadline: row.normalized_headline,
+    titleFingerprint: row.title_fingerprint,
+    latestHeadline: row.latest_headline,
+    firstSeenDate: dateText(row.first_seen_date),
+    lastSeenDate: dateText(row.last_seen_date),
+    firstRunId: row.first_run_id,
+    latestRunId: row.latest_run_id,
+    updateCount: row.update_count,
+    createdAt: timestamp(row.created_at),
+    updatedAt: timestamp(row.updated_at),
+  };
+}
+
+function mapStoryEventUpdate(row: StoryEventUpdateRow): StoryEventUpdateRecord {
+  if (
+    !Array.isArray(row.evidence_ids) ||
+    row.evidence_ids.some((value) => typeof value !== "string")
+  ) {
+    throw new Error(`Story event update ${row.id} contains invalid evidence IDs.`);
+  }
+
+  return {
+    id: row.id,
+    eventId: row.event_id,
+    runId: row.run_id,
+    storyId: row.story_id,
+    headline: row.headline,
+    evidenceIds: row.evidence_ids,
+    observedAt: timestamp(row.observed_at),
+    createdAt: timestamp(row.created_at),
+  };
+}
+
+function bestStoryEventMatch(
+  candidates: readonly StoryEventRecord[],
+  normalizedHeadline: string,
+  titleFingerprint: string,
+): StoryEventRecord | null {
+  const exact = candidates.find((candidate) => candidate.titleFingerprint === titleFingerprint);
+
+  if (exact !== undefined) {
+    return exact;
+  }
+
+  let best: { event: StoryEventRecord; similarity: number } | null = null;
+
+  for (const candidate of candidates) {
+    const similarity = storyHeadlineSimilarity(candidate.normalizedHeadline, normalizedHeadline);
+
+    if (similarity >= 0.62 && (best === null || similarity > best.similarity)) {
+      best = { event: candidate, similarity };
+    }
+  }
+
+  return best?.event ?? null;
+}
+
+export function storyHeadlineSimilarity(left: string, right: string): number {
+  if (left === right) {
+    return 1;
+  }
+
+  if (left.length < 8 || right.length < 8) {
+    return 0;
+  }
+
+  const leftBigrams = textBigrams(left);
+  const rightBigrams = textBigrams(right);
+  let intersection = 0;
+
+  for (const value of leftBigrams) {
+    if (rightBigrams.has(value)) {
+      intersection += 1;
+    }
+  }
+
+  return (2 * intersection) / (leftBigrams.size + rightBigrams.size);
+}
+
+function textBigrams(value: string): Set<string> {
+  const characters = [...value];
+  const output = new Set<string>();
+
+  for (let index = 0; index < characters.length - 1; index += 1) {
+    output.add(`${characters[index]}${characters[index + 1]}`);
+  }
+
+  return output;
+}
+
+function storyEventId(tenantId: string, topic: string, titleFingerprint: string): string {
+  return `event-${createHash("sha256")
+    .update(`${tenantId}\u0000${topic}\u0000${titleFingerprint}`)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+function storyEventUpdateId(runId: string, storyId: string): string {
+  return `event-update-${createHash("sha256")
+    .update(`${runId}\u0000${storyId}`)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
 function dateText(value: Date | string): string {
   return value instanceof Date ? value.toISOString().slice(0, 10) : value;
 }
@@ -1379,4 +1695,32 @@ interface PreviouslySeenContentRow extends QueryResultRow {
   report_date: Date | string;
   fingerprint: string;
   title_fingerprint: string;
+}
+
+interface StoryEventRow extends QueryResultRow {
+  id: string;
+  tenant_id: string;
+  topic: string;
+  canonical_headline: string;
+  normalized_headline: string;
+  title_fingerprint: string;
+  latest_headline: string;
+  first_seen_date: Date | string;
+  last_seen_date: Date | string;
+  first_run_id: string;
+  latest_run_id: string;
+  update_count: number;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface StoryEventUpdateRow extends QueryResultRow {
+  id: string;
+  event_id: string;
+  run_id: string;
+  story_id: string;
+  headline: string;
+  evidence_ids: unknown;
+  observed_at: Date | string;
+  created_at: Date | string;
 }

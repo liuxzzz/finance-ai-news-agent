@@ -6,6 +6,8 @@ import {
   createAgentGraph,
   createModelAgentHandlers,
   createToolCallingResearchProvider,
+  headlineFingerprint,
+  normalizeHeadline,
   type AgentGraphStateValue,
 } from "@finance-ai-news-agent/core";
 import { createDeepSeekModelProvider } from "@finance-ai-news-agent/model-ai-sdk";
@@ -42,6 +44,7 @@ export interface LiveResearchConfig {
   maxEvidence: number;
   maxCandidateEvidence: number;
   historyLookbackDays: number;
+  storyEventLookbackDays: number;
 }
 
 export const DEFAULT_RSS_FEED_URLS = [
@@ -121,6 +124,30 @@ export async function runPersistentAiLive(args: string[]): Promise<void> {
         mediaType: "text/markdown",
         content: renderLiveDigest(state, run),
       }),
+      persistMemory: async (state, run) => {
+        const saved = await store.saveStoryEventUpdates({
+          runId: run.id,
+          stories: state.stories.map((story) => ({
+            storyId: story.id,
+            headline: story.headline,
+            normalizedHeadline: normalizeHeadline(story.headline),
+            titleFingerprint: headlineFingerprint(story.headline),
+            evidenceIds: story.evidenceIds,
+          })),
+          observedAt: new Date().toISOString(),
+          lookbackDays: researchConfig.storyEventLookbackDays,
+        });
+
+        return {
+          events: saved.map((item) => ({
+            eventId: item.event.id,
+            updateCount: item.event.updateCount,
+            isNewEvent: item.isNewEvent,
+            isNewUpdate: item.isNewUpdate,
+          })),
+        };
+      },
+      memoryVersion: "story-events@1",
       output,
       deliveryTarget,
     });
@@ -146,6 +173,7 @@ export async function runPersistentAiLive(args: string[]): Promise<void> {
         rssMaxEvidence: researchConfig.maxEvidence,
         rssMaxCandidateEvidence: researchConfig.maxCandidateEvidence,
         historyLookbackDays: researchConfig.historyLookbackDays,
+        storyEventLookbackDays: researchConfig.storyEventLookbackDays,
         maxToolCalls: researchConfig.maxToolCalls,
       },
       promptVersions: {
@@ -265,6 +293,13 @@ export function resolveLiveResearchConfig(
     1,
     365,
   );
+  const storyEventLookbackDays = numericEnvironmentValue(
+    environment,
+    "STORY_EVENT_LOOKBACK_DAYS",
+    30,
+    1,
+    365,
+  );
 
   return {
     feedUrls,
@@ -275,6 +310,7 @@ export function resolveLiveResearchConfig(
     maxEvidence,
     maxCandidateEvidence,
     historyLookbackDays,
+    storyEventLookbackDays,
   };
 }
 

@@ -19,6 +19,7 @@ describe("live RSS research configuration", () => {
       maxEvidence: 12,
       maxCandidateEvidence: 24,
       historyLookbackDays: 7,
+      storyEventLookbackDays: 30,
     });
   });
 
@@ -32,6 +33,7 @@ describe("live RSS research configuration", () => {
       maxEvidence: 12,
       maxCandidateEvidence: 24,
       historyLookbackDays: 7,
+      storyEventLookbackDays: 30,
     });
   });
 
