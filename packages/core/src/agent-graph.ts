@@ -6,17 +6,14 @@ import {
   type AgentGraphStateValue,
 } from "./agent-state.js";
 
-export type AgentRoleHandler = (
+export type AgentNodeHandler = (
   state: AgentGraphStateValue,
 ) => AgentGraphStateUpdate | Promise<AgentGraphStateUpdate>;
 
-export interface AgentRoleHandlers {
-  planner: AgentRoleHandler;
-  researcher: AgentRoleHandler;
-  curator: AgentRoleHandler;
-  editor: AgentRoleHandler;
-  critic: AgentRoleHandler;
-  memoryCurator: AgentRoleHandler;
+export interface AgentNodeHandlers {
+  research: AgentNodeHandler;
+  curateWrite: AgentNodeHandler;
+  review: AgentNodeHandler;
 }
 
 export interface CreateAgentGraphOptions {
@@ -24,36 +21,31 @@ export interface CreateAgentGraphOptions {
 }
 
 export function createAgentGraph(
-  handlers: AgentRoleHandlers,
+  handlers: AgentNodeHandlers,
   options: CreateAgentGraphOptions = {},
 ) {
-  const planner: GraphNode<typeof AgentGraphState> = handlers.planner;
-  const researcher: GraphNode<typeof AgentGraphState> = handlers.researcher;
-  const curator: GraphNode<typeof AgentGraphState> = handlers.curator;
-  const editor: GraphNode<typeof AgentGraphState> = handlers.editor;
-  const critic: GraphNode<typeof AgentGraphState> = handlers.critic;
-  const memoryCurator: GraphNode<typeof AgentGraphState> = handlers.memoryCurator;
+  const research: GraphNode<typeof AgentGraphState> = handlers.research;
+  const curateWrite: GraphNode<typeof AgentGraphState> = handlers.curateWrite;
+  const review: GraphNode<typeof AgentGraphState> = handlers.review;
 
   const graph = new StateGraph(AgentGraphState)
-    .addNode("planner", planner)
-    .addNode("researcher", researcher)
-    .addNode("curator", curator)
-    .addNode("editor", editor)
-    .addNode("critic", critic)
-    .addNode("memory_curator", memoryCurator)
-    .addEdge(START, "planner")
-    .addEdge("planner", "researcher")
-    .addEdge("researcher", "curator")
-    .addEdge("curator", "editor")
-    .addEdge("editor", "critic")
-    .addConditionalEdges("critic", (state) => {
-      if (state.approved || state.revisionCount >= state.maxRevisions) {
-        return "memory_curator";
-      }
+    .addNode("research", research)
+    .addNode("curate_write", curateWrite)
+    .addNode("review", review)
+    .addEdge(START, "research")
+    .addEdge("research", "curate_write")
+    .addEdge("curate_write", "review")
+    .addConditionalEdges(
+      "review",
+      (state) => {
+        if (state.approved || state.revisionCount >= state.maxRevisions) {
+          return END;
+        }
 
-      return "editor";
-    })
-    .addEdge("memory_curator", END);
+        return state.reviewRoute === "research" ? "research" : "curate_write";
+      },
+      [END, "research", "curate_write"],
+    );
 
   if (options.checkpoint === false) {
     return graph.compile();

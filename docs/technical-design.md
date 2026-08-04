@@ -1,6 +1,6 @@
 # Finance & AI News Agent 技术方案
 
-> 状态：Draft v2
+> 状态：Draft v3
 >
 > 目标：以 AI-first 和开源优先的方式，每天自动从多个平台收集金融与 AI 信息，完成整理、生成简报和发送；记忆能力贯穿收集、整理、输出全过程。
 
@@ -11,19 +11,19 @@
 AI 不是流水线末端的摘要组件，而是产品的语义决策核心：
 
 - 面对非结构化信息、开放问题和策略选择时，默认先设计 Agent 能力和评测集，而不是堆叠硬编码规则；
-- Planner Agent 决定今天研究什么，Research Agent 决定如何补充证据，Curator Agent 判断事件关系与价值，Editor Agent 组织表达，Critic Agent 校验质量，Memory Curator 决定沉淀什么；
+- 研究规划、证据收集、事件判断、编辑、校验和记忆筛选是六种逻辑职责，不要求一一对应六个运行节点；MVP 将其收敛为 `Research`、`Curate & Write`、`Review` 三个 AI 节点；
 - Prompt、上下文工程、模型路由、工具描述、记忆策略和评测数据都是一等代码资产；
 - 优先通过模型能力、反馈和评测改进效果，确定性规则只处理安全边界、协议转换、数据完整性、成本预算和外部副作用；
 - 任何 AI 结论都必须携带证据、置信度和生成版本，AI-first 不等于不可控。
 
 各职责的默认归属：
 
-| 问题类型                                     | 默认负责人              |
-| -------------------------------------------- | ----------------------- |
-| 研究方向、查询扩展、语义理解、价值判断、写作 | Agent                   |
-| MCP 协议、权限、Schema、超时、幂等、事务     | 确定性运行时            |
-| 事实一致性、引用完整性、发布质量             | Critic Agent + 程序校验 |
-| 模型或 Prompt 是否变好                       | 离线评测 + 线上反馈     |
+| 问题类型                                     | 默认负责人             |
+| -------------------------------------------- | ---------------------- |
+| 研究方向、查询扩展、语义理解、价值判断、写作 | AI 节点                |
+| MCP 协议、权限、Schema、超时、幂等、事务     | 确定性运行时           |
+| 事实一致性、引用完整性、发布质量             | Review 节点 + 程序校验 |
+| 模型或 Prompt 是否变好                       | 离线评测 + 线上反馈    |
 
 ### 0.2 开源优先
 
@@ -44,11 +44,11 @@ AI 不是流水线末端的摘要组件，而是产品的语义决策核心：
 
 本产品采用“AI Agent 决策内核 + 确定性执行外壳”的架构：
 
-- 由多个角色化 Agent 完成研究规划、信息研究、事件整理、编辑、校验和记忆巩固；
-- Agent 可在阶段内进行受预算约束的规划、工具选择和修订循环；
+- MVP 由 `Research`、`Curate & Write`、`Review` 三个 AI 节点承担六种逻辑职责，避免过早拆分模型调用；
+- AI 节点可在阶段内进行受预算约束的规划、工具选择和修订循环；
 - 确定性运行时负责阶段边界、状态持久化、重试、幂等、权限和审计；
 - MCP 连接器负责访问外部平台，但只允许调用配置白名单内的工具；
-- Model Gateway 支持不同商业或本地模型，并按 Agent 角色选择模型；
+- Model Gateway 支持不同商业或本地模型，并按 AI 节点或能力选择模型；
 - PostgreSQL 是事实与运行状态的主存储，`pgvector` 支持跨日相似检索；
 - 记忆不是独立的尾部步骤，而是一个横跨收集、整理、输出的能力平面；
 - 简报先持久化为不可变制品，再调用 Output Plugin 发送，飞书只是首个官方插件；
@@ -58,7 +58,7 @@ MVP 推荐技术栈：
 
 - 语言与运行时：TypeScript、Node.js；
 - 包管理：pnpm；
-- Agent 编排：LangGraph.js，仅用于 `packages/core` 内部的角色图、分支和 checkpoint；
+- Agent 编排：LangGraph.js，仅用于 `packages/core` 内部的 AI 节点图、分支和 checkpoint；
 - 数据 Schema：Zod；
 - MCP：官方 TypeScript SDK，支持 `stdio` 与 Streamable HTTP 两种传输；
 - 数据库：PostgreSQL + `pgvector`；
@@ -67,7 +67,7 @@ MVP 推荐技术栈：
 - 部署：一个 Agent Worker 容器 + PostgreSQL，MCP Server 按平台独立部署或由 Worker 拉起；
 - 可观测性：结构化日志、OpenTelemetry Trace、基础指标与运行审计表。
 
-首期不引入 Kafka、Redis、Temporal 或分布式多 Agent 基础设施。多个 Agent 是同一 Runtime 内的角色化节点，不要求独立进程。每天一次的任务量不足以抵消分布式组件的维护成本。若后续演进为高频、多租户或大量长任务，再将当前持久化工作流替换为专业工作流引擎。
+首期不引入 Kafka、Redis、Temporal 或分布式多 Agent 基础设施。三个 AI 节点运行在同一 Runtime 和进程内，可以复用同一个模型，不代表三个独立 Agent 服务。每天一次的任务量不足以抵消分布式组件的维护成本。若后续演进为高频、多租户或大量长任务，再将当前持久化工作流替换为专业工作流引擎。
 
 MCP SDK 处于持续演进中，实现时应锁定经过验证的依赖版本，升级前运行全部连接器契约测试，不能在生产构建中自动漂移到最新版本。
 
@@ -113,16 +113,12 @@ flowchart TB
     S[外部调度器 / CLI] --> RT[Agent Runtime]
 
     subgraph AI["AI 决策层"]
-      PA[Planner Agent]
-      RA[Research Agents]
-      CA[Curator Agent]
-      EA[Editor Agent]
-      QA[Critic Agent]
-      MA[Memory Curator]
-      PA --> RA --> CA --> EA --> QA
-      QA -.修订.-> RA
-      QA -.修订.-> EA
-      QA --> MA
+      RA[Research<br/>规划 + 证据研究]
+      CW[Curate & Write<br/>事件判断 + 编辑]
+      RV[Review<br/>事实 + 引用 + 风险校验]
+      RA --> CW --> RV
+      RV -.补充证据.-> RA
+      RV -.定向修订.-> CW
     end
 
     RT <--> AI
@@ -147,7 +143,7 @@ flowchart TB
 
 系统分为两个互补层：
 
-- AI 决策层负责语义工作，并允许在单阶段内按预算进行“计划 → 研究 → 校验 → 修订”；
+- AI 决策层负责语义工作，并允许在预算内进行“研究 → 整理与写作 → 校验 → 修订”；
 - 确定性执行层负责让 Agent 的每一步可授权、可持久化、可重放、可计费和可终止。
 
 外部副作用集中在两个边界：
@@ -164,47 +160,49 @@ sequenceDiagram
     participant Scheduler as 调度器
     participant Runtime as Agent Runtime
     participant DB as PostgreSQL
-    participant Planner as Planner/Research Agents
+    participant Research as Research
     participant MCP as MCP Sources
-    participant Editor as Curator/Editor Agents
-    participant Critic as Critic Agent
+    participant Compose as Curate & Write
+    participant Review as Review
+    participant Memory as Memory Service
     participant Output as Output Plugin
 
     Scheduler->>Runtime: run(report_date, edition)
     Runtime->>DB: 创建唯一 Run，固化版本
     Runtime->>DB: 读取记忆、偏好与来源状态
-    Runtime->>Planner: 生成研究目标与工具计划
+    Runtime->>Research: 主题、历史覆盖和授权工具
     loop 每个主题，预算内迭代
-      Planner->>Runtime: 结构化 MCP Tool Plan
+      Research->>Runtime: 结构化 MCP Tool Plan
       Runtime->>MCP: 权限校验后并发执行
       MCP-->>Runtime: 原始条目
       Runtime->>DB: 保存 Raw Items 与检查点
-      Runtime->>Planner: 返回证据覆盖与缺口
+      Runtime->>Research: 返回证据覆盖与缺口
     end
-    Runtime->>Editor: 聚类、判断价值、生成简报
-    Editor->>Critic: 简报 + 证据集合
+    Runtime->>Compose: 标准化条目、历史事件和偏好
+    Compose->>Review: 结构化简报 + 证据集合
     alt 校验不通过且仍有预算
-      Critic->>Planner: 请求补充证据
-      Critic->>Editor: 请求定向修订
+      Review->>Research: 请求补充证据
+      Review->>Compose: 请求定向修订
     else 校验通过
       Runtime->>DB: 保存 Stories 和 Digest
       Runtime->>Output: 使用 delivery_key 发送制品
       Output-->>Runtime: message_id / receipt
-      Runtime->>DB: 保存回执并由 Memory Curator 巩固记忆
+      Runtime->>DB: 保存发送回执
+      Runtime->>Memory: 提交可追溯的记忆候选
     end
 ```
 
 ### 4.1 阶段定义
 
-| 阶段          | 输入                           | 输出                                  | 是否允许外部副作用 |
-| ------------- | ------------------------------ | ------------------------------------- | ------------------ |
-| `PREPARE`     | 运行日期、版本化配置、历史记忆 | Run、配置快照、Agent 研究计划         | 否                 |
-| `COLLECT`     | Agent 工具计划、来源游标       | 原始条目、证据覆盖、来源执行记录      | 只读 MCP           |
-| `NORMALIZE`   | 原始条目                       | 标准化条目、实体、指纹                | 否                 |
-| `ORGANIZE`    | 标准化条目、历史记忆           | Agent 事件簇、价值判断、入选条目      | 否                 |
-| `COMPOSE`     | 入选事件、偏好记忆             | 结构化简报、Critic 报告、制品         | 仅模型调用         |
-| `DELIVER`     | 已持久化简报制品               | Output Plugin 发送回执                | 写外部平台         |
-| `CONSOLIDATE` | 本次运行全部结果               | Memory Curator 提议、新增或版本化记忆 | 否                 |
+| 阶段             | 输入                           | 输出                               | 是否允许外部副作用 |
+| ---------------- | ------------------------------ | ---------------------------------- | ------------------ |
+| `PREPARE`        | 运行日期、版本化配置、历史记忆 | Run、配置快照、研究上下文          | 否                 |
+| `COLLECT`        | Research 工具计划、来源游标    | 原始条目、证据覆盖、来源执行记录   | 只读 MCP           |
+| `NORMALIZE`      | 原始条目                       | 标准化条目、实体、指纹             | 否                 |
+| `CURATE_COMPOSE` | 标准化条目、历史记忆、偏好     | 事件簇、价值判断、结构化简报、制品 | 仅模型调用         |
+| `REVIEW`         | 结构化简报、证据集合           | Review 报告、发布或修订路由        | 仅模型调用         |
+| `DELIVER`        | 已持久化简报制品               | Output Plugin 发送回执             | 写外部平台         |
+| `CONSOLIDATE`    | 本次运行全部结果               | 新增或版本化的可追溯记忆           | 否                 |
 
 每个阶段有 `pending/running/succeeded/failed/skipped` 状态。阶段成功后记录输入哈希和输出引用；重试时从最近的成功检查点继续。
 
@@ -216,11 +214,11 @@ sequenceDiagram
 
 - 领取任务并获得运行锁；
 - 按阶段执行和持久化检查点；
-- 为每个 Agent 分配 token、工具调用次数、时间和修订轮数预算；
+- 为每个 AI 节点分配 token、工具调用次数、时间和修订轮数预算；
 - 判断重试、降级、停止发布或继续部分发布；
 - 传递统一的 `run_id`、超时和取消信号；
 - 固化本次配置版本、Prompt 版本、模型和 MCP 工具版本；
-- 记录 Agent 输入、结构化输出、工具计划和 Critic 反馈，敏感内容按策略脱敏；
+- 记录 AI 节点输入、结构化输出、工具计划和 Review 反馈，敏感内容按策略脱敏；
 - 发出领域事件，如 `ItemCollected`、`DigestReady`、`DeliverySucceeded`。
 
 并发控制建议：
@@ -230,15 +228,27 @@ sequenceDiagram
 - 使用 PostgreSQL advisory lock 配合数据库唯一约束，避免调度器重复触发；
 - 每次 MCP 调用设置超时，失败只影响对应来源，不直接终止整个 Run。
 
-### 5.2 Agent Runtime 与角色图
+### 5.2 Agent Runtime、AI 节点与职责
 
-首期 Agent Runtime 使用 LangGraph.js `StateGraph` 实现角色节点、条件分支、有限修订循环和 checkpoint。`thread_id` 使用产品 `run_id`，但 Run、发送幂等和长期记忆仍由产品数据库维护。LangGraph 类型不能进入 Plugin SDK 或领域对象，以便未来替换编排实现。
+首期 Agent Runtime 使用 LangGraph.js `StateGraph` 实现三个 AI 节点、条件分支、有限修订循环和 checkpoint。`thread_id` 使用产品 `run_id`，但 Run、发送幂等和长期记忆仍由产品数据库维护。LangGraph 类型不能进入 Plugin SDK 或领域对象，以便未来替换编排实现。
 
-Agent Runtime 提供统一角色接口：
+MVP 运行图：
+
+```mermaid
+flowchart LR
+    Start([START]) --> R[Research]
+    R --> CW[Curate & Write]
+    CW --> V[Review]
+    V -- 补充证据 --> R
+    V -- 定向修订 --> CW
+    V -- 通过或预算耗尽 --> End([END])
+```
+
+Agent Runtime 提供统一节点接口：
 
 ```ts
-interface AgentRole<TInput, TOutput> {
-  name: string;
+interface AgentNode<TInput, TOutput> {
+  id: "research" | "curate_write" | "review";
   promptVersion: string;
   inputSchema: Schema<TInput>;
   outputSchema: Schema<TOutput>;
@@ -254,18 +264,35 @@ interface AgentContext {
 }
 ```
 
-首期角色：
+六种职责与 MVP 节点的映射：
 
-- `PlannerAgent`：结合关注主题、昨日覆盖和来源能力生成当日研究计划；
-- `ResearchAgent`：按金融、AI 或交叉主题执行研究，识别证据缺口并提出新的 MCP 工具计划；
-- `CuratorAgent`：判断条目是否属于同一事件、事件是否有实质更新以及为什么重要；
-- `EditorAgent`：选择栏目、控制信息密度并生成结构化简报；
-- `CriticAgent`：检查遗漏、重复、事实与引用、表达质量和风险；只返回问题和定向修订请求；
-- `MemoryCuratorAgent`：从本次运行提议值得长期保留的事件、事实、来源表现和偏好候选。
+| 逻辑职责       | 目的                                       | MVP 承载位置                 |
+| -------------- | ------------------------------------------ | ---------------------------- |
+| Planner        | 结合主题、历史覆盖和来源能力决定研究方向   | `Research`                   |
+| Researcher     | 执行证据研究、识别缺口并提出 MCP 工具计划  | `Research`                   |
+| Curator        | 聚类事件、判断实质更新、价值和入选优先级   | `Curate & Write`             |
+| Editor         | 选择栏目、控制信息密度并生成结构化简报     | `Curate & Write`             |
+| Critic         | 检查遗漏、重复、事实、引用、表达质量和风险 | `Review`                     |
+| Memory Curator | 判断哪些事实、来源表现和偏好值得长期保存   | Phase 2 可选；首期由策略处理 |
 
-这些角色是可观察、可替换的逻辑节点，不是必须独立部署的微服务。同一模型可以承担多个角色，也可以由 `ModelRouter` 按质量、成本、上下文长度或本地可用性路由到不同模型。
+三个节点的边界：
 
-Agent 角色、Prompt、工具描述和输出 Schema 作为公开资源放在仓库中。任何效果改动都应同时更新回放样本或评测，避免“只改 Prompt、无法解释回归”。
+- `Research`：在授权目录和预算内完成“研究规划 + 工具计划 + 证据充分性判断”，但不直接执行 MCP；
+- `Curate & Write`：完成“事件聚类与价值判断 + 结构化写作”，输出可追溯到证据的 `DailyDigest`；
+- `Review`：只返回结构化问题、风险等级和下一步路由，不直接改写内容，也不执行外部副作用。
+
+职责是 Prompt、Schema 和评测层面的标签，节点才是运行、状态和成本边界。同一模型可以承担三个节点，也可以由 `ModelRouter` 按质量、成本、上下文长度或本地可用性选择模型。满足以下任一条件时，才将职责拆成更多节点：
+
+- 回放评测能证明拆分后质量有稳定提升；
+- 单次上下文过大，合并节点无法稳定输出；
+- 某项职责需要不同模型、工具权限、预算或人工审批；
+- 失败恢复需要在两项职责之间建立独立 checkpoint。
+
+长期记忆首先由确定性 `Memory Service` 按来源、置信度、有效期和冲突规则处理。只有当候选筛选确实需要复杂语义判断，并有独立评测支撑时，才启用 `Memory Curator` AI 节点。
+
+当前仓库的 Fixture Demo 已采用上述三个 Handler，并通过 Review 的结构化路由分别支持补证与定向修订。Fixture 只验证拓扑和状态传递，真实模型接线仍需补充版本化 Prompt、Schema 解析和回放评测。
+
+AI 节点的 Prompt、工具描述和输出 Schema 作为公开资源放在仓库中。任何效果改动都应同时更新回放样本或评测，避免“只改 Prompt、无法解释回归”。
 
 ### 5.3 MCP Connector Registry
 
@@ -307,7 +334,7 @@ topics: [finance]
 
 启动时执行能力探测，确认工具存在、输入 Schema 兼容、所需权限可用。验证失败的连接器进入 `unavailable`，Agent 不能改用未授权工具。
 
-Planner/Research Agent 可以从 `AllowedToolCatalog` 中选择工具和生成结构化参数，但计划必须满足 JSON Schema、权限和预算约束，例如时间范围、最大查询数、语言和禁止项。确定性 MCP Gateway 完成最终参数校验与执行，模型永远不能绕过 Gateway 直接访问外部服务。
+`Research` 节点可以从 `AllowedToolCatalog` 中选择工具和生成结构化参数，但计划必须满足 JSON Schema、权限和预算约束，例如时间范围、最大查询数、语言和禁止项。确定性 MCP Gateway 完成最终参数校验与执行，模型永远不能绕过 Gateway 直接访问外部服务。
 
 ### 5.4 Normalizer
 
@@ -356,13 +383,13 @@ interface NormalizedItem {
 2. canonical URL 和内容哈希匹配；
 3. 标题指纹匹配；
 4. 对最近 N 天候选做向量相似检索；
-5. 由 Curator Agent 对语义候选作最终裁决，并输出关系、理由和置信度。
+5. 由 `Curate & Write` 节点中的 Curator 职责对语义候选作最终裁决，并输出关系、理由和置信度。
 
 阈值、回看天数和来源权重全部配置化。事件簇保留多来源，不因去重丢失佐证。跨日同一 Story 新增重要信息时标记为 `update`；没有实质新增时降低新颖度，避免连续多天重复推送。
 
-### 5.6 Curator 与 Ranker
+### 5.6 Curate & Write：事件判断与排序
 
-排序以 Curator Agent 的上下文判断为主，以政策规则和可解释公式为约束与降级路径。Agent 需要结合多来源证据、历史事件进展、用户偏好和当日整体版面给出分项得分及理由：
+排序以 `Curate & Write` 节点的上下文判断为主，以政策规则和可解释公式为约束与降级路径。该节点需要结合多来源证据、历史事件进展、用户偏好和当日整体版面给出分项得分及理由：
 
 ```text
 score =
@@ -374,15 +401,15 @@ score =
   0.10 * user_interest
 ```
 
-权重只是默认策略，进入公开配置而非写死。每个分项为 0～100，并保存证据和理由。最终入选不是简单取公式 Top-K：Curator Agent 还需要处理栏目多样性、重大事件覆盖和跨领域关联。公式用于提供一致基线、成本降级和结果解释，不能取代 Agent 的整体编辑判断。
+权重只是默认策略，进入公开配置而非写死。每个分项为 0～100，并保存证据和理由。最终入选不是简单取公式 Top-K：`Curate & Write` 还需要处理栏目多样性、重大事件覆盖和跨领域关联。公式用于提供一致基线、成本降级和结果解释，不能取代 AI 的整体编辑判断。
 
 硬规则只排除明确无效或不安全的内容，例如过期内容、明显广告、黑名单来源和低可信孤证。新的语义例外优先通过 Agent 指令与评测解决，不持续扩张难以维护的规则树。
 
 金融突发信息可设置更高的证据门槛：低可信来源的单一报道不能被写成确定事实，应降级、排除或在简报中明确标注“未经充分确认”。
 
-### 5.7 Editor 与 Critic
+### 5.7 Curate & Write 与 Review
 
-Editor Agent 分两次生成，降低长上下文的不稳定性：
+`Curate & Write` 节点分两步生成，降低长上下文的不稳定性；两步共享同一个节点预算、状态和 Trace。Runtime 可以根据上下文规模选择一次批量结构化调用或少量受限的内部调用，但不因此拆成两个 LangGraph 节点：
 
 1. 对每个 Story 基于其证据条目生成 `StorySummary`；
 2. 将已验证的 StorySummary 编排为 `DailyDigest`。
@@ -409,7 +436,7 @@ interface DailyDigest {
 }
 ```
 
-Editor 返回 JSON，应用通过 Schema 校验后交给 Critic。Critic 基于相同证据集合返回结构化问题；在预算允许时，Runtime 将问题路由给 Research Agent 补证或 Editor Agent 修订。最终程序校验至少包含：
+`Curate & Write` 返回 JSON，应用通过 Schema 校验后交给 `Review`。`Review` 基于相同证据集合返回结构化问题；在预算允许时，Runtime 将问题路由给 `Research` 补证或 `Curate & Write` 定向修订。最终程序校验至少包含：
 
 - 每条摘要必须有 `sourceItemIds`；
 - 来源引用必须真实存在；
@@ -599,9 +626,9 @@ interface MemoryService {
 ### 9.2 Prompt Injection 防护
 
 - MCP 返回内容一律标为不可信数据；
-- Agent 只能看到当前角色所需的逻辑工具目录，不能直接获得 MCP 传输、凭证或网络访问能力；
+- AI 节点只能看到当前职责所需的逻辑工具目录，不能直接获得 MCP 传输、凭证或网络访问能力；
 - 不执行资讯正文中的指令、链接或代码；
-- Research Agent 产生结构化工具计划，确定性 Gateway 再执行权限、Schema、预算和参数校验；
+- `Research` 产生结构化工具计划，确定性 Gateway 再执行权限、Schema、预算和参数校验；
 - 对正文长度、URL、附件类型和响应体大小设置限制；
 - 系统指令、策略和数据使用固定分隔及结构化消息传递；
 - 输出前验证引用、数字、日期和实体是否来自允许的证据集合。
@@ -808,16 +835,15 @@ docs/
 ### 14.3 回放评测
 
 保留一组脱敏历史原始条目，在不访问外部平台的情况下运行
-`NORMALIZE → ORGANIZE → COMPOSE`：
+`NORMALIZE → CURATE_COMPOSE → REVIEW`：
 
-- Planner 的主题覆盖率和工具计划有效率；
-- Research Agent 的证据召回、证据充分性和无效工具调用率；
+- `Research` 的主题覆盖率、工具计划有效率、证据召回、证据充分性和无效工具调用率；
 - 去重 Precision/Recall；
 - 同事件聚类准确率；
 - Top-K 相关性和重要性；
 - 事实与引用一致率；
 - 跨日重复率；
-- Critic 问题召回率、误报率和修订成功率；
+- `Review` 的问题召回率、误报率和修订成功率；
 - 摘要长度、可读性、延迟和成本。
 
 评测集、评分器和基线结果随代码公开。Prompt、模型、工具描述或权重更新必须通过回放基线后才能进入生产；模型评审只作为有版本的评分器之一，关键事实指标由程序验证。
@@ -841,19 +867,19 @@ docs/
 
 - 确认 Apache-2.0 或其他许可证，建立贡献、安全、行为准则和发布文档；
 - 初始化 pnpm workspace、TypeScript、测试、Lint、配置和数据库迁移；
-- 定义 Plugin SDK、Agent Role、Model Provider 和 Eval 接口；
+- 定义 Plugin SDK、Agent Node/Role、Model Provider 和 Eval 接口；
 - 实现 Run/Stage 状态机、CLI、结构化日志；
 - 提供 Fixture Model/MCP、文件输出、本地 Docker Compose 和 CI；
-- 建立首批 Planner、Research、Curator、Editor、Critic 回放样本。
+- 建立首批 `Research`、`Curate & Write`、`Review` 回放样本，并在样本标签中保留六种逻辑职责。
 
 验收：新贡献者无需商业账号即可运行完整 Fixture 流程；空来源也可创建、恢复、结束一个 Run，重复触发不重复执行。
 
 ### Phase 1：可发送的最小闭环
 
 - 接入 2～3 个 MCP 来源；
-- 实现 Planner/Research Agent 的研究计划与预算循环；
-- 完成标准化、精确去重以及 Curator Agent 的事件判断；
-- 接入 Editor/Critic Agent 的结构化生成与修订；
+- 实现 `Research` 的研究计划、工具计划与预算循环；
+- 完成标准化、精确去重以及 `Curate & Write` 的事件判断和简报生成；
+- 接入 `Review` 的结构化校验、补证路由与定向修订；
 - 生成 Markdown 并通过飞书 MCP 发送；
 - 保存原始条目、Digest 和 Delivery。
 
@@ -862,7 +888,7 @@ docs/
 ### Phase 2：记忆与质量
 
 - 引入 pgvector、跨日 Story 聚类和事件进展；
-- 实现 Memory Service 与 Memory Curator Agent；
+- 实现 Memory Service；根据回放评测决定是否启用独立的 Memory Curator AI 节点；
 - 加入偏好、反馈、来源信任和质量门槛；
 - 建立历史回放评测集。
 
@@ -881,7 +907,7 @@ docs/
 
 ### ADR-001：AI 决策内核运行在确定性执行外壳中
 
-AI 默认负责研究、语义判断、编辑和记忆巩固，并可在阶段内进行预算受限的修订循环。每日简报同时属于可审计的数据产品，因此协议、权限、状态、预算和副作用由确定性运行时控制。两者不是 AI 与规则的折中，而是智能和可靠性的职责分离。
+AI 默认负责研究、语义判断和编辑，并可在阶段内进行预算受限的修订循环；长期记忆默认由确定性 Memory Service 管理，仅在候选筛选需要复杂语义判断时引入 AI。每日简报同时属于可审计的数据产品，因此协议、权限、状态、预算和副作用由确定性运行时控制。两者不是 AI 与规则的折中，而是智能和可靠性的职责分离。
 
 ### ADR-002：PostgreSQL 同时承载状态、内容和记忆索引
 
@@ -909,11 +935,15 @@ CLI、Agent Runtime、工作流、记忆、评测和插件机制均属于开源�
 
 ### ADR-008：效果改进采用 Eval-driven Development
 
-AI-first 产品不能只依靠单元测试，也不能靠主观比较 Prompt。每个 Agent 角色都要有公开回放样本、任务指标和成本指标；模型、Prompt、工具描述和记忆策略变更需要展示评测差异。
+AI-first 产品不能只依靠单元测试，也不能靠主观比较 Prompt。每个 AI 节点及其逻辑职责都要有公开回放样本、任务指标和成本指标；模型、Prompt、工具描述和记忆策略变更需要展示评测差异。
 
 ### ADR-009：LangGraph.js 是内部编排实现
 
-首期使用 LangGraph.js 避免重复实现角色图、条件循环和 checkpoint，但只允许 `packages/core` 依赖它。公共 Plugin SDK、领域数据和业务存储不暴露 LangGraph 类型，产品外层工作流也不由 LangGraph 独占。
+首期使用 LangGraph.js 避免重复实现 AI 节点图、条件循环和 checkpoint；业务编排代码只存在于 `packages/core`。根包可以为 LangGraph Studio 本地加载声明必要的开发依赖，但公共 Plugin SDK、领域数据和业务存储不暴露 LangGraph 类型，产品外层工作流也不由 LangGraph 独占。
+
+### ADR-010：MVP 使用三个 AI 节点承载六种逻辑职责
+
+角色名称用于描述 Prompt、Schema 和评测职责，不自动形成运行节点。MVP 固定采用 `Research`、`Curate & Write`、`Review` 三个 AI 节点；节点拆分必须由质量、上下文、权限、预算或恢复边界的实际证据驱动，不能仅因角色名称不同而增加模型调用。
 
 ## 17. MVP 完成定义
 
@@ -927,7 +957,7 @@ AI-first 产品不能只依靠单元测试，也不能靠主观比较 Prompt。�
 - 能查看单次 Run 的阶段、输入版本、错误、成本和发送回执；
 - 支持 dry-run、从失败阶段恢复、重发已有制品；
 - 飞书目标、MCP 工具和凭证符合最小权限；
-- Planner、Research、Curator、Editor 和 Critic 有独立的结构化输入输出及预算；
+- `Research`、`Curate & Write`、`Review` 有独立的结构化输入输出、预算和回放指标；
 - 历史样本回放测试纳入 CI，Prompt 或模型变化可以看到质量与成本差异；
 - 不依赖商业账号即可通过 Fixture、文件输出和 Docker Compose 本地运行；
 - 至少有一个第三方风格的示例插件只通过公开 Plugin SDK 实现；

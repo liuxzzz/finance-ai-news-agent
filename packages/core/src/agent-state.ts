@@ -19,6 +19,10 @@ export const StorySchema = z.object({
 
 export type Story = z.infer<typeof StorySchema>;
 
+export const ReviewRouteSchema = z.enum(["research", "revise"]);
+
+export type ReviewRoute = z.infer<typeof ReviewRouteSchema>;
+
 export const AgentGraphState = new StateSchema({
   runId: z.string(),
   topic: z.string(),
@@ -29,8 +33,8 @@ export const AgentGraphState = new StateSchema({
   draft: z.string().default(""),
   critique: z.string().default(""),
   approved: z.boolean().default(false),
+  reviewRoute: ReviewRouteSchema.default("revise"),
   revisionCount: z.number().int().nonnegative().default(0),
-  memoryCandidates: z.array(z.string()).default(() => []),
   trace: new ReducedValue(
     z.array(z.string()).default(() => []),
     {

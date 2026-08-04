@@ -13,3 +13,6 @@ dist/
 .pnpm-store/
 .DS_Store
 *.log
+
+# LangGraph API
+.langgraph_api

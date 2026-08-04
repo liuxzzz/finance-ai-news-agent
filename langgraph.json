@@ -1,0 +1,7 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "finance_ai_news": "./apps/cli/src/studio-graph.ts:graph"
+  }
+}
