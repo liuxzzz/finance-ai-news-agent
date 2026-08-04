@@ -79,6 +79,7 @@ export interface ToolDescriptor {
 }
 
 export interface ToolCall {
+  id: string;
   name: string;
   arguments: Record<string, unknown>;
 }
@@ -91,6 +92,20 @@ export interface ToolResult {
 export interface McpGateway {
   listTools(): Promise<ToolDescriptor[]>;
   callTool(call: ToolCall): Promise<ToolResult>;
+}
+
+export interface ToolCallingModelRequest extends ModelRequest {
+  tools: ToolDescriptor[];
+  toolChoice?: "auto" | "required" | "none";
+}
+
+export interface ToolCallingModelResponse extends ModelResponse {
+  toolCalls: ToolCall[];
+}
+
+/** Optional model extension that returns tool intents without executing them. */
+export interface ToolCallingModelProvider extends ModelProvider {
+  generateWithTools(request: ToolCallingModelRequest): Promise<ToolCallingModelResponse>;
 }
 
 export interface MemoryRecord {
@@ -138,17 +153,21 @@ export {
   RunStatusSchema,
   type ArtifactRecord,
   type CompleteDeliveryInput,
+  type CompleteModelCallInput,
   type CompleteRunStageInput,
   type CreateRunInput,
   type CreateRunResult,
   type DeliveryRecord,
   type DeliveryStatus,
   type FailDeliveryInput,
+  type FailModelCallInput,
   type FailRunStageInput,
   type FinishRunInput,
   type JsonObject,
   type JsonPrimitive,
   type JsonValue,
+  type ModelCallRecord,
+  type ModelCallStatus,
   type RunIdentity,
   type RunLock,
   type RunRecord,
@@ -161,6 +180,9 @@ export {
   type SkipRunStageInput,
   type StartDeliveryInput,
   type StartDeliveryResult,
+  type StartModelCallInput,
+  type StartModelCallResult,
   type StartRunStageInput,
   type TerminalRunStatus,
+  ModelCallStatusSchema,
 } from "./runtime-store.js";

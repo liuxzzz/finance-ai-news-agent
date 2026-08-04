@@ -59,6 +59,9 @@ importers:
       '@finance-ai-news-agent/plugin-sdk':
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
+      '@finance-ai-news-agent/source-mcp':
+        specifier: workspace:*
+        version: link:../../plugins/source-mcp
       '@finance-ai-news-agent/storage-postgres':
         specifier: workspace:*
         version: link:../../plugins/storage-postgres
@@ -116,9 +119,15 @@ importers:
 
   plugins/source-mcp:
     dependencies:
+      '@finance-ai-news-agent/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
       '@modelcontextprotocol/sdk':
         specifier: 1.30.0
         version: 1.30.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
+      ajv:
+        specifier: 8.20.0
+        version: 8.20.0
 
   plugins/storage-postgres:
     dependencies:

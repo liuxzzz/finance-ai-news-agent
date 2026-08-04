@@ -7,15 +7,22 @@ import {
   type StructuredModelProvider,
   type StructuredModelRequest,
   type StructuredModelResponse,
+  type ToolCallingModelProvider,
+  type ToolCallingModelRequest,
+  type ToolCallingModelResponse,
+  type ToolDescriptor,
 } from "@finance-ai-news-agent/plugin-sdk";
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import {
   generateText,
+  jsonSchema,
   NoObjectGeneratedError,
   NoOutputGeneratedError,
   Output,
   type JSONValue,
   type LanguageModel,
+  tool,
+  type ToolSet,
 } from "ai";
 
 export interface DeepSeekModelProviderOptions {
@@ -29,7 +36,9 @@ export type DeepSeekThinkingMode = "adaptive" | "enabled" | "disabled";
 
 type DeepSeekProviderOptions = Record<string, Record<string, JSONValue>>;
 
-export class AiSdkModelProvider implements ModelProvider, StructuredModelProvider {
+export class AiSdkModelProvider
+  implements ModelProvider, StructuredModelProvider, ToolCallingModelProvider
+{
   readonly manifest: PluginManifest = {
     id: "model-ai-sdk",
     name: "AI SDK Model Provider",
@@ -127,6 +136,36 @@ export class AiSdkModelProvider implements ModelProvider, StructuredModelProvide
       throw error;
     }
   }
+
+  async generateWithTools(request: ToolCallingModelRequest): Promise<ToolCallingModelResponse> {
+    const tools = createAiSdkTools(request.tools);
+    const result = await generateText({
+      model: this.model,
+      system: request.system,
+      prompt: request.prompt,
+      tools,
+      ...(request.toolChoice === undefined ? {} : { toolChoice: request.toolChoice }),
+      ...(request.maxOutputTokens === undefined
+        ? {}
+        : { maxOutputTokens: request.maxOutputTokens }),
+      ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
+      ...(request.timeoutMs === undefined ? {} : { timeout: request.timeoutMs }),
+      ...(request.maxRetries === undefined ? {} : { maxRetries: request.maxRetries }),
+      ...(this.providerOptions === undefined ? {} : { providerOptions: this.providerOptions }),
+    });
+
+    return {
+      text: result.text,
+      model: this.modelName,
+      finishReason: result.finishReason,
+      usage: mapUsage(result.usage),
+      toolCalls: result.toolCalls.map((call) => ({
+        id: call.toolCallId,
+        name: call.toolName,
+        arguments: requireToolArguments(call.input, call.toolName),
+      })),
+    };
+  }
 }
 
 export function createDeepSeekModelProvider(
@@ -194,4 +233,37 @@ function hasUnsafeModelCharacter(model: string): boolean {
     const codePoint = character.codePointAt(0);
     return codePoint !== undefined && (codePoint <= 32 || codePoint === 127);
   });
+}
+
+function createAiSdkTools(descriptors: ToolDescriptor[]): ToolSet {
+  const tools: ToolSet = {};
+  const names = new Set<string>();
+
+  for (const descriptor of descriptors) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(descriptor.name)) {
+      throw new Error(`Invalid tool name: ${descriptor.name}.`);
+    }
+
+    if (names.has(descriptor.name)) {
+      throw new Error(`Duplicate tool name: ${descriptor.name}.`);
+    }
+
+    names.add(descriptor.name);
+    tools[descriptor.name] = tool({
+      ...(descriptor.description === undefined ? {} : { description: descriptor.description }),
+      inputSchema: jsonSchema<Record<string, unknown>>(
+        descriptor.inputSchema as Parameters<typeof jsonSchema>[0],
+      ),
+    });
+  }
+
+  return tools;
+}
+
+function requireToolArguments(input: unknown, toolName: string): Record<string, unknown> {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error(`Tool ${toolName} returned non-object arguments.`);
+  }
+
+  return input as Record<string, unknown>;
 }

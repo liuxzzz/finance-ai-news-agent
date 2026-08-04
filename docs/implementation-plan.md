@@ -1,8 +1,8 @@
 # Finance & AI News Agent 实现计划与进度
 
 > 更新日期：2026-08-04
-> 当前阶段：DeepSeek 结构化节点已接入，准备进入真实来源采集
-> 总体进度：约 50%
+> 当前阶段：Function Calling 与 MCP Gateway 已接入，正在配置真实新闻来源
+> 总体进度：约 55%
 
 ## 1. 阶段进度
 
@@ -10,8 +10,8 @@
 | ----------------- | ------------------------------------------------------------ | ------ | ---: | -------: |
 | P0 工程骨架       | Monorepo、三节点 Graph、Plugin SDK、Fixture Demo、CI、Studio | 已完成 | 100% |        - |
 | P1 运行时与持久化 | Run/Stage 状态机、数据库迁移、幂等、恢复、审计               | 已完成 | 100% |        - |
-| P2 AI 节点        | Prompt、结构化输出、真实模型、预算、回放评测                 | 进行中 |  85% |   1–2 周 |
-| P3 MCP 采集       | MCP Gateway、权限与预算、契约测试、金融/AI 来源              | 待实施 |   5% |     2 周 |
+| P2 AI 节点        | Prompt、结构化输出、真实模型、预算、回放评测                 | 已完成 | 100% |        - |
+| P3 MCP 采集       | MCP Gateway、权限与预算、契约测试、金融/AI 来源              | 进行中 |  35% |     2 周 |
 | P4 内容处理       | 标准化、去重、聚类、排序、证据引用、Digest                   | 待实施 |   5% |   1–2 周 |
 | P5 输出闭环       | 制品持久化、飞书发送、发送幂等、重发                         | 待实施 |  10% |     1 周 |
 | P6 记忆与质量     | pgvector、历史去重、事件进展、偏好与反馈                     | 待实施 |   5% |     2 周 |
@@ -73,7 +73,10 @@ PostgreSQL 验证确认相同 Run 可复用，失败节点从 durable checkpoint
 - [x] 记录模型请求数和 Token Usage
 - [x] 增加 `run-ai` 持久化回放命令和离线契约测试
 - [x] 使用本地 DeepSeek 凭据完成真实 API 冒烟测试
-- [ ] 增加持久化 Model Call Ledger，实现跨进程恢复的硬成本上限
+- [x] 增加持久化 Model Call Ledger，实现跨进程恢复的硬成本上限
+- [x] 增加 DeepSeek Function Calling 公共契约和 AI SDK 适配
+- [x] 实现白名单、参数校验、超时和结果大小限制的 MCP Gateway
+- [x] 增加 Streamable HTTP MCP `run-live` 入口和离线契约测试
 - [ ] 接入 MCP 实时新闻来源并替换合成回放 Evidence
 
 完成标准：DeepSeek 对固定 Evidence 生成结构化 Stories，Review 能通过或定向修订；任意未知
@@ -82,6 +85,10 @@ Evidence ID 都被程序拒绝，最终制品的 URL 与输入 Evidence 完全�
 2026-08-04 冒烟验收：真实 DeepSeek 回放 Run 一次执行成功，完成 2 次结构化模型请求；随后同一
 Run 从 dry-run 恢复交付，并在第三次触发时直接幂等复用，模型请求数未增加。生成制品和运行审计
 均未包含 API Key。
+
+2026-08-04 Ledger 验收：迁移 `002_model_calls.sql` 后再次执行真实 DeepSeek 回放，数据库分别记录
+`curate_write` 与 `review` 两条成功调用及各自 Token；Function Calling、MCP 白名单/Schema 校验和
+`run-live` 配置由离线测试覆盖。真实新闻源仍需提供 MCP 服务地址和允许的工具名后验收。
 
 ## 6. MVP 里程碑
 

@@ -1,5 +1,10 @@
+import { createHash, randomUUID } from "node:crypto";
+
 import {
   StructuredModelOutputError,
+  type ModelCallRecord,
+  type RuntimeStore,
+  type SerializedError,
   type StructuredModelProvider,
   type StructuredModelRequest,
   type StructuredModelResponse,
@@ -30,10 +35,18 @@ export type ResearchProvider = (
 export interface CreateModelAgentHandlersOptions {
   model: StructuredModelProvider;
   research: ResearchProvider;
+  modelCallLedger?: ModelCallLedger;
   structuredOutputAttempts?: number;
   timeoutMs?: number;
   maxModelRequests?: number;
+  now?: () => Date;
+  generateId?: () => string;
 }
+
+export type ModelCallLedger = Pick<
+  RuntimeStore,
+  "startModelCall" | "completeModelCall" | "failModelCall"
+>;
 
 export class ModelRequestBudgetExceededError extends Error {
   override readonly name = "ModelRequestBudgetExceededError";
@@ -51,6 +64,8 @@ export function createModelAgentHandlers(
     options.maxModelRequests ?? 8,
     "maxModelRequests",
   );
+  const now = options.now ?? (() => new Date());
+  const generateId = options.generateId ?? randomUUID;
 
   return {
     research: async (state) => {
@@ -59,6 +74,7 @@ export function createModelAgentHandlers(
       return {
         plan: output.plan,
         evidence: output.evidence,
+        modelUsage: output.modelUsage,
         trace: ["research"],
       };
     },
@@ -79,6 +95,11 @@ export function createModelAgentHandlers(
       const evidenceIds = new Set(state.evidence.map((evidence) => evidence.id));
       const generated = await generateWithRecovery({
         provider: options.model,
+        ledger: options.modelCallLedger,
+        runId: state.runId,
+        maxModelRequests,
+        now,
+        generateId,
         attempts,
         request: {
           role: "curate_write",
@@ -119,6 +140,11 @@ export function createModelAgentHandlers(
       const attempts = remainingAttempts(state, maxModelRequests, structuredOutputAttempts);
       const generated = await generateWithRecovery({
         provider: options.model,
+        ledger: options.modelCallLedger,
+        runId: state.runId,
+        maxModelRequests,
+        now,
+        generateId,
         attempts,
         request: {
           role: "review",
@@ -183,6 +209,11 @@ export function renderCuratedDraft(
 
 interface GenerateWithRecoveryOptions<OUTPUT> {
   provider: StructuredModelProvider;
+  ledger: ModelCallLedger | undefined;
+  runId: string;
+  maxModelRequests: number;
+  now: () => Date;
+  generateId: () => string;
   request: StructuredModelRequest<OUTPUT>;
   attempts: number;
 }
@@ -206,24 +237,30 @@ async function generateWithRecovery<OUTPUT>(
   let usage = emptyUsage();
 
   for (let attempt = 1; attempt <= options.attempts; attempt += 1) {
+    const prompt =
+      attempt === 1
+        ? originalPrompt
+        : [
+            originalPrompt,
+            "",
+            "RECOVERY_INSTRUCTION:",
+            "上一次响应为空、被截断、不是有效 JSON，或没有通过 Schema/引用校验。",
+            "请重新生成完整 JSON 对象；不得解释错误，不得沿用未知 ID。",
+          ].join("\n");
+    const call = await startDurableModelCall(options, prompt);
+
     try {
       const response = await options.provider.generateStructured({
         ...options.request,
-        prompt:
-          attempt === 1
-            ? originalPrompt
-            : [
-                originalPrompt,
-                "",
-                "RECOVERY_INSTRUCTION:",
-                "上一次响应为空、被截断、不是有效 JSON，或没有通过 Schema/引用校验。",
-                "请重新生成完整 JSON 对象；不得解释错误，不得沿用未知 ID。",
-              ].join("\n"),
+        prompt,
       });
 
+      await completeDurableModelCall(options, call, response);
       usage = addUsage(usage, response.usage);
       return { response, attempts: attempt, usage };
     } catch (error) {
+      await failDurableModelCall(options, call, error);
+
       if (error instanceof StructuredModelOutputError) {
         usage = addUsage(usage, error.usage);
       }
@@ -235,6 +272,124 @@ async function generateWithRecovery<OUTPUT>(
   }
 
   throw new Error("Structured generation exhausted without returning a result.");
+}
+
+async function startDurableModelCall<OUTPUT>(
+  options: GenerateWithRecoveryOptions<OUTPUT>,
+  prompt: string,
+): Promise<ModelCallRecord | null> {
+  if (options.ledger === undefined) {
+    return null;
+  }
+
+  const startedAt = options.now().toISOString();
+  const reservation = await options.ledger.startModelCall({
+    id: options.generateId(),
+    runId: options.runId,
+    role: options.request.role,
+    providerId: options.provider.manifest.id,
+    requestHash: modelRequestHash(options.request, prompt),
+    maxRequests: options.maxModelRequests,
+    startedAt,
+  });
+
+  if (!reservation.accepted) {
+    throw new ModelRequestBudgetExceededError(
+      `The run exhausted its durable model request budget of ${options.maxModelRequests} ` +
+        `(${reservation.usedRequests} requests already reserved).`,
+    );
+  }
+
+  return reservation.call;
+}
+
+async function completeDurableModelCall<OUTPUT>(
+  options: GenerateWithRecoveryOptions<OUTPUT>,
+  call: ModelCallRecord | null,
+  response: StructuredModelResponse<OUTPUT>,
+): Promise<void> {
+  if (options.ledger === undefined || call === null) {
+    return;
+  }
+
+  const usage = usageTotals(response.usage);
+  await options.ledger.completeModelCall({
+    callId: call.id,
+    model: response.model,
+    finishReason: response.finishReason,
+    ...usage,
+    finishedAt: options.now().toISOString(),
+  });
+}
+
+async function failDurableModelCall<OUTPUT>(
+  options: GenerateWithRecoveryOptions<OUTPUT>,
+  call: ModelCallRecord | null,
+  error: unknown,
+): Promise<void> {
+  if (options.ledger === undefined || call === null) {
+    return;
+  }
+
+  const usage = usageTotals(error instanceof StructuredModelOutputError ? error.usage : undefined);
+
+  try {
+    await options.ledger.failModelCall({
+      callId: call.id,
+      error: serializeModelError(error),
+      ...usage,
+      finishedAt: options.now().toISOString(),
+    });
+  } catch (ledgerError) {
+    throw new AggregateError(
+      [error, ledgerError],
+      `Model call ${call.id} failed and its durable ledger could not be finalized.`,
+      { cause: ledgerError },
+    );
+  }
+}
+
+function modelRequestHash<OUTPUT>(request: StructuredModelRequest<OUTPUT>, prompt: string): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        role: request.role,
+        system: request.system,
+        prompt,
+        schemaName: request.schemaName,
+        schemaDescription: request.schemaDescription ?? null,
+        maxOutputTokens: request.maxOutputTokens ?? null,
+        temperature: request.temperature ?? null,
+        timeoutMs: request.timeoutMs ?? null,
+        maxRetries: request.maxRetries ?? null,
+      }),
+    )
+    .digest("hex");
+}
+
+function usageTotals(
+  usage:
+    | {
+        inputTokens?: number;
+        outputTokens?: number;
+        totalTokens?: number;
+      }
+    | undefined,
+): ModelUsageTotals {
+  const inputTokens = usage?.inputTokens ?? 0;
+  const outputTokens = usage?.outputTokens ?? 0;
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens: usage?.totalTokens ?? inputTokens + outputTokens,
+  };
+}
+
+function serializeModelError(error: unknown): SerializedError {
+  return {
+    name: error instanceof Error ? error.name : "Error",
+    message: error instanceof Error ? error.message : String(error),
+  };
 }
 
 function remainingAttempts(

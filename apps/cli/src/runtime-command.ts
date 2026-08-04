@@ -97,11 +97,12 @@ export async function showRunStatus(runId: string | undefined): Promise<void> {
       throw new Error(`Run ${runId} was not found.`);
     }
 
-    const [stages, deliveries] = await Promise.all([
+    const [stages, deliveries, modelCalls] = await Promise.all([
       store.listStages(run.id),
       store.listDeliveries(run.id),
+      store.listModelCalls(run.id),
     ]);
-    process.stdout.write(`${JSON.stringify({ run, stages, deliveries }, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify({ run, stages, modelCalls, deliveries }, null, 2)}\n`);
   } finally {
     await pool.end();
   }
@@ -206,7 +207,9 @@ export function requireDatabaseUrl(): string {
   const databaseUrl = process.env.DATABASE_URL;
 
   if (databaseUrl === undefined || databaseUrl.trim().length === 0) {
-    throw new Error("DATABASE_URL is required for migrate, run, run-ai, and status commands.");
+    throw new Error(
+      "DATABASE_URL is required for migrate, run, run-ai, run-live, and status commands.",
+    );
   }
 
   return databaseUrl;

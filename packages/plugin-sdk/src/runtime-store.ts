@@ -33,6 +33,10 @@ export const DeliveryStatusSchema = z.enum(["running", "succeeded", "failed"]);
 
 export type DeliveryStatus = z.infer<typeof DeliveryStatusSchema>;
 
+export const ModelCallStatusSchema = z.enum(["running", "succeeded", "failed"]);
+
+export type ModelCallStatus = z.infer<typeof ModelCallStatusSchema>;
+
 export interface SerializedError {
   name: string;
   message: string;
@@ -175,6 +179,59 @@ export interface FailDeliveryInput {
   finishedAt: string;
 }
 
+export interface ModelCallRecord {
+  id: string;
+  runId: string;
+  ordinal: number;
+  role: string;
+  providerId: string;
+  requestHash: string;
+  status: ModelCallStatus;
+  model: string | null;
+  finishReason: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  error: SerializedError | null;
+  startedAt: string;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StartModelCallInput {
+  id: string;
+  runId: string;
+  role: string;
+  providerId: string;
+  requestHash: string;
+  maxRequests: number;
+  startedAt: string;
+}
+
+export type StartModelCallResult =
+  | { accepted: true; call: ModelCallRecord; usedRequests: number }
+  | { accepted: false; call: null; usedRequests: number };
+
+export interface CompleteModelCallInput {
+  callId: string;
+  model: string;
+  finishReason: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  finishedAt: string;
+}
+
+export interface FailModelCallInput {
+  callId: string;
+  error: SerializedError;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  finishedAt: string;
+}
+
 export interface RunLock {
   release(): Promise<void>;
 }
@@ -206,4 +263,10 @@ export interface RuntimeStore {
   listDeliveries(runId: string): Promise<DeliveryRecord[]>;
   completeDelivery(input: CompleteDeliveryInput): Promise<DeliveryRecord>;
   failDelivery(input: FailDeliveryInput): Promise<DeliveryRecord>;
+
+  /** Atomically reserves one paid model request or rejects it at the durable run budget. */
+  startModelCall(input: StartModelCallInput): Promise<StartModelCallResult>;
+  listModelCalls(runId: string): Promise<ModelCallRecord[]>;
+  completeModelCall(input: CompleteModelCallInput): Promise<ModelCallRecord>;
+  failModelCall(input: FailModelCallInput): Promise<ModelCallRecord>;
 }

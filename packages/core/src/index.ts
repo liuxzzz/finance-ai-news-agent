@@ -69,3 +69,10 @@ export {
   type RunExecutionResult,
   type RunExecutorOptions,
 } from "./run-executor.js";
+
+export {
+  NewsToolResultSchema,
+  createToolCallingResearchProvider,
+  type CreateToolCallingResearchOptions,
+  type NewsToolResult,
+} from "./tool-calling-research.js";

@@ -1,13 +1,16 @@
 import type {
   ArtifactRecord,
   CompleteDeliveryInput,
+  CompleteModelCallInput,
   CompleteRunStageInput,
   CreateRunInput,
   CreateRunResult,
   DeliveryRecord,
   FailDeliveryInput,
+  FailModelCallInput,
   FailRunStageInput,
   FinishRunInput,
+  ModelCallRecord,
   RunIdentity,
   RunLock,
   RunRecord,
@@ -17,6 +20,8 @@ import type {
   SkipRunStageInput,
   StartDeliveryInput,
   StartDeliveryResult,
+  StartModelCallInput,
+  StartModelCallResult,
   StartRunStageInput,
 } from "@finance-ai-news-agent/plugin-sdk";
 
@@ -27,6 +32,7 @@ export class InMemoryRuntimeStore implements RuntimeStore {
   private readonly stages = new Map<string, RunStageRecord[]>();
   private readonly artifacts = new Map<string, ArtifactRecord>();
   private readonly deliveries = new Map<string, DeliveryRecord>();
+  private readonly modelCalls = new Map<string, ModelCallRecord>();
   private readonly lockedRunIds = new Set<string>();
   private sequence = 0;
 
@@ -283,6 +289,84 @@ export class InMemoryRuntimeStore implements RuntimeStore {
     }));
   }
 
+  async startModelCall(input: StartModelCallInput): Promise<StartModelCallResult> {
+    this.requireRun(input.runId);
+
+    if (!Number.isSafeInteger(input.maxRequests) || input.maxRequests <= 0) {
+      throw new Error("maxRequests must be a positive integer.");
+    }
+
+    if (this.modelCalls.has(input.id)) {
+      throw new Error(`Model call ${input.id} already exists.`);
+    }
+
+    const usedRequests = [...this.modelCalls.values()].filter(
+      (call) => call.runId === input.runId,
+    ).length;
+
+    if (usedRequests >= input.maxRequests) {
+      return { accepted: false, call: null, usedRequests };
+    }
+
+    const call: ModelCallRecord = {
+      id: input.id,
+      runId: input.runId,
+      ordinal: usedRequests + 1,
+      role: input.role,
+      providerId: input.providerId,
+      requestHash: input.requestHash,
+      status: "running",
+      model: null,
+      finishReason: null,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      error: null,
+      startedAt: input.startedAt,
+      finishedAt: null,
+      createdAt: input.startedAt,
+      updatedAt: input.startedAt,
+    };
+    this.modelCalls.set(call.id, call);
+    return { accepted: true, call: clone(call), usedRequests: usedRequests + 1 };
+  }
+
+  async listModelCalls(runId: string): Promise<ModelCallRecord[]> {
+    return clone(
+      [...this.modelCalls.values()]
+        .filter((call) => call.runId === runId)
+        .sort((left, right) => left.ordinal - right.ordinal),
+    );
+  }
+
+  async completeModelCall(input: CompleteModelCallInput): Promise<ModelCallRecord> {
+    return this.updateRunningModelCall(input.callId, (call) => ({
+      ...call,
+      status: "succeeded",
+      model: input.model,
+      finishReason: input.finishReason,
+      inputTokens: input.inputTokens,
+      outputTokens: input.outputTokens,
+      totalTokens: input.totalTokens,
+      error: null,
+      finishedAt: input.finishedAt,
+      updatedAt: input.finishedAt,
+    }));
+  }
+
+  async failModelCall(input: FailModelCallInput): Promise<ModelCallRecord> {
+    return this.updateRunningModelCall(input.callId, (call) => ({
+      ...call,
+      status: "failed",
+      inputTokens: input.inputTokens,
+      outputTokens: input.outputTokens,
+      totalTokens: input.totalTokens,
+      error: clone(input.error),
+      finishedAt: input.finishedAt,
+      updatedAt: input.finishedAt,
+    }));
+  }
+
   private requireRun(runId: string): RunRecord {
     const run = this.runs.get(runId);
 
@@ -336,6 +420,25 @@ export class InMemoryRuntimeStore implements RuntimeStore {
 
     const updated = update(delivery);
     this.deliveries.set(key, updated);
+    return clone(updated);
+  }
+
+  private updateRunningModelCall(
+    callId: string,
+    update: (call: ModelCallRecord) => ModelCallRecord,
+  ): ModelCallRecord {
+    const call = this.modelCalls.get(callId);
+
+    if (call === undefined) {
+      throw new Error(`Model call ${callId} does not exist.`);
+    }
+
+    if (call.status !== "running") {
+      throw new Error(`Model call ${callId} is not running.`);
+    }
+
+    const updated = update(call);
+    this.modelCalls.set(callId, updated);
     return clone(updated);
   }
 

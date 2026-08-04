@@ -80,6 +80,86 @@ describe("DeepSeek AI SDK adapter", () => {
       await closeServer(server);
     }
   });
+
+  it("returns DeepSeek function calls without executing tools inside the provider", async () => {
+    const capture: CapturedRequest = {};
+    const server = await startDeepSeekStub(capture, {
+      finishReason: "tool_calls",
+      message: {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call-search-1",
+            type: "function",
+            function: {
+              name: "search_news",
+              arguments: JSON.stringify({ query: "AI infrastructure", limit: 5 }),
+            },
+          },
+        ],
+      },
+    });
+
+    try {
+      const provider = createDeepSeekModelProvider({
+        apiKey: "test-secret",
+        baseURL: serverBaseUrl(server),
+        model: "deepseek-v4-flash",
+      });
+      const response = await provider.generateWithTools({
+        role: "research",
+        system: "Use the allowed tools.",
+        prompt: "Find relevant news.",
+        tools: [
+          {
+            name: "search_news",
+            description: "Search approved news sources.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                query: { type: "string" },
+                limit: { type: "integer", minimum: 1, maximum: 10 },
+              },
+              required: ["query", "limit"],
+              additionalProperties: false,
+            },
+          },
+        ],
+        toolChoice: "auto",
+        maxRetries: 0,
+      });
+
+      expect(response.toolCalls).toEqual([
+        {
+          id: "call-search-1",
+          name: "search_news",
+          arguments: { query: "AI infrastructure", limit: 5 },
+        },
+      ]);
+      expect(capture.body?.tools).toEqual([
+        {
+          type: "function",
+          function: {
+            name: "search_news",
+            description: "Search approved news sources.",
+            parameters: {
+              type: "object",
+              properties: {
+                query: { type: "string" },
+                limit: { type: "integer", minimum: 1, maximum: 10 },
+              },
+              required: ["query", "limit"],
+              additionalProperties: false,
+            },
+          },
+        },
+      ]);
+      expect(capture.body?.thinking).toEqual({ type: "disabled" });
+    } finally {
+      await closeServer(server);
+    }
+  });
 });
 
 interface CapturedRequest {
@@ -88,7 +168,17 @@ interface CapturedRequest {
   body?: Record<string, unknown>;
 }
 
-async function startDeepSeekStub(capture: CapturedRequest, content: string): Promise<Server> {
+type StubCompletion =
+  | string
+  | {
+      finishReason: string;
+      message: Record<string, unknown>;
+    };
+
+async function startDeepSeekStub(
+  capture: CapturedRequest,
+  completion: StubCompletion,
+): Promise<Server> {
   const server = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
 
@@ -109,8 +199,11 @@ async function startDeepSeekStub(capture: CapturedRequest, content: string): Pro
         choices: [
           {
             index: 0,
-            message: { role: "assistant", content },
-            finish_reason: "stop",
+            message:
+              typeof completion === "string"
+                ? { role: "assistant", content: completion }
+                : completion.message,
+            finish_reason: typeof completion === "string" ? "stop" : completion.finishReason,
           },
         ],
         usage: {

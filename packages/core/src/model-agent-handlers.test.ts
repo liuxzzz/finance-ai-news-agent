@@ -10,7 +10,12 @@ import { describe, expect, it } from "vitest";
 
 import { createAgentGraph } from "./agent-graph.js";
 import type { Evidence } from "./agent-state.js";
-import { createModelAgentHandlers, renderCuratedDraft } from "./model-agent-handlers.js";
+import { InMemoryRuntimeStore } from "./in-memory-runtime-store.js";
+import {
+  createModelAgentHandlers,
+  ModelRequestBudgetExceededError,
+  renderCuratedDraft,
+} from "./model-agent-handlers.js";
 import { ReviewOutputSchema, type ResearchNodeOutput } from "./model-node-output.js";
 
 const evidence = [
@@ -120,6 +125,50 @@ describe("model-backed agent handlers", () => {
       "A revise decision cannot contain research actions",
     );
   });
+
+  it("persists successful and schema-invalid attempts in the model call ledger", async () => {
+    const invalid = curatedOutput();
+    invalid.stories[0]!.evidenceIds = ["unknown-source"];
+    const model = new ReplayStructuredModelProvider([invalid, curatedOutput(), approvedReview()]);
+    const ledger = new InMemoryRuntimeStore();
+
+    const result = await invoke(model, researchOutput(evidence), 1, { ledger });
+    const calls = await ledger.listModelCalls(result.runId);
+
+    expect(calls.map((call) => [call.ordinal, call.role, call.status])).toEqual([
+      [1, "curate_write", "failed"],
+      [2, "curate_write", "succeeded"],
+      [3, "review", "succeeded"],
+    ]);
+    expect(calls.map((call) => call.totalTokens)).toEqual([140, 140, 140]);
+    expect(calls.every((call) => /^[a-f0-9]{64}$/.test(call.requestHash))).toBe(true);
+  });
+
+  it("enforces the durable request budget when checkpoint state undercounts after restart", async () => {
+    const ledger = new InMemoryRuntimeStore();
+    await prepareLedgerRun(ledger);
+    const reserved = await ledger.startModelCall({
+      id: "interrupted-call",
+      runId: "model-handler-test",
+      role: "curate_write",
+      providerId: "replay-model",
+      requestHash: "interrupted-request",
+      maxRequests: 1,
+      startedAt: "2026-08-04T00:00:00.000Z",
+    });
+    expect(reserved.accepted).toBe(true);
+
+    const model = new ReplayStructuredModelProvider([curatedOutput(), approvedReview()]);
+
+    await expect(
+      invoke(model, researchOutput(evidence), 1, {
+        ledger,
+        maxModelRequests: 1,
+      }),
+    ).rejects.toBeInstanceOf(ModelRequestBudgetExceededError);
+    expect(model.calls).toEqual([]);
+    expect(await ledger.listModelCalls("model-handler-test")).toHaveLength(1);
+  });
 });
 
 class ReplayStructuredModelProvider implements StructuredModelProvider {
@@ -182,6 +231,7 @@ function researchOutput(items: Evidence[]): ResearchNodeOutput {
     schemaVersion: "research.v1",
     plan: ["Review the supplied replay evidence."],
     evidence: items,
+    modelUsage: { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 },
   };
 }
 
@@ -247,10 +297,19 @@ async function invoke(
   model: ReplayStructuredModelProvider,
   research: ResearchNodeOutput,
   maxRevisions: number,
+  options: { ledger?: InMemoryRuntimeStore; maxModelRequests?: number } = {},
 ) {
+  if (options.ledger !== undefined) {
+    await prepareLedgerRun(options.ledger);
+  }
+
   const handlers = createModelAgentHandlers({
     model,
     research: () => research,
+    ...(options.ledger === undefined ? {} : { modelCallLedger: options.ledger }),
+    ...(options.maxModelRequests === undefined
+      ? {}
+      : { maxModelRequests: options.maxModelRequests }),
   });
   const graph = createAgentGraph(handlers);
 
@@ -266,4 +325,21 @@ async function invoke(
       },
     },
   );
+}
+
+async function prepareLedgerRun(ledger: InMemoryRuntimeStore): Promise<void> {
+  await ledger.createOrGetRun({
+    id: "model-handler-test",
+    tenantId: "test",
+    reportDate: "2026-08-04",
+    edition: "ledger",
+    topic: "Finance & AI",
+    maxRevisions: 1,
+    inputHash: "ledger-test",
+    configSnapshot: {},
+    promptVersions: {},
+    modelSnapshot: {},
+    scheduledAt: null,
+    createdAt: "2026-08-04T00:00:00.000Z",
+  });
 }

@@ -11,6 +11,7 @@ export const replayResearch: ResearchProvider = (state) => ({
     "合并重复来源并保留每条结论的证据引用",
     "检查摘要是否严格受给定摘录支持",
   ],
+  modelUsage: { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 },
   evidence: [
     {
       id: "replay-ai-infra-1",

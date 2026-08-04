@@ -3,16 +3,20 @@ import { randomUUID } from "node:crypto";
 import type {
   ArtifactRecord,
   CompleteDeliveryInput,
+  CompleteModelCallInput,
   CompleteRunStageInput,
   CreateRunInput,
   CreateRunResult,
   DeliveryRecord,
   DeliveryStatus,
   FailDeliveryInput,
+  FailModelCallInput,
   FailRunStageInput,
   FinishRunInput,
   JsonObject,
   JsonValue,
+  ModelCallRecord,
+  ModelCallStatus,
   RunIdentity,
   RunLock,
   RunRecord,
@@ -25,6 +29,8 @@ import type {
   SkipRunStageInput,
   StartDeliveryInput,
   StartDeliveryResult,
+  StartModelCallInput,
+  StartModelCallResult,
   StartRunStageInput,
 } from "@finance-ai-news-agent/plugin-sdk";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
@@ -47,6 +53,12 @@ const ARTIFACT_COLUMNS = `
 const DELIVERY_COLUMNS = `
   id, run_id, artifact_id, delivery_key, plugin_id, target, status, attempt,
   receipt, error, started_at, finished_at, created_at, updated_at
+`;
+
+const MODEL_CALL_COLUMNS = `
+  id, run_id, ordinal, role, provider_id, request_hash, status, model,
+  finish_reason, input_tokens, output_tokens, total_tokens, error,
+  started_at, finished_at, created_at, updated_at
 `;
 
 /** PostgreSQL implementation of the deterministic runtime persistence boundary. */
@@ -540,6 +552,128 @@ export class PostgresRuntimeStore implements RuntimeStore {
     return this.requireUpdatedDelivery(input.deliveryId, result.rows[0]);
   }
 
+  async startModelCall(input: StartModelCallInput): Promise<StartModelCallResult> {
+    if (!Number.isSafeInteger(input.maxRequests) || input.maxRequests <= 0) {
+      throw new Error("maxRequests must be a positive integer.");
+    }
+
+    return withTransaction(this.pool, async (client) => {
+      const run = await client.query<{ id: string }>(
+        "SELECT id FROM runs WHERE id = $1 FOR UPDATE",
+        [input.runId],
+      );
+
+      if (run.rows[0] === undefined) {
+        throw new Error(`Run ${input.runId} does not exist.`);
+      }
+
+      const usage = await client.query<{ used_requests: number | string }>(
+        "SELECT COUNT(*) AS used_requests FROM model_calls WHERE run_id = $1",
+        [input.runId],
+      );
+      const usedRequests = Number(usage.rows[0]?.used_requests ?? 0);
+
+      if (usedRequests >= input.maxRequests) {
+        return { accepted: false, call: null, usedRequests };
+      }
+
+      const inserted = await client.query<ModelCallRow>(
+        `
+          INSERT INTO model_calls (
+            id, run_id, ordinal, role, provider_id, request_hash, status,
+            model, finish_reason, input_tokens, output_tokens, total_tokens,
+            error, started_at, finished_at, created_at, updated_at
+          )
+          VALUES (
+            $1, $2, $3, $4, $5, $6, 'running',
+            NULL, NULL, 0, 0, 0,
+            NULL, $7, NULL, $7, $7
+          )
+          RETURNING ${MODEL_CALL_COLUMNS}
+        `,
+        [
+          input.id,
+          input.runId,
+          usedRequests + 1,
+          input.role,
+          input.providerId,
+          input.requestHash,
+          input.startedAt,
+        ],
+      );
+      const call = mapModelCall(requireRow(inserted.rows[0], "Started model call"));
+      return { accepted: true, call, usedRequests: usedRequests + 1 };
+    });
+  }
+
+  async listModelCalls(runId: string): Promise<ModelCallRecord[]> {
+    const result = await this.pool.query<ModelCallRow>(
+      `
+        SELECT ${MODEL_CALL_COLUMNS}
+        FROM model_calls
+        WHERE run_id = $1
+        ORDER BY ordinal ASC
+      `,
+      [runId],
+    );
+    return result.rows.map(mapModelCall);
+  }
+
+  async completeModelCall(input: CompleteModelCallInput): Promise<ModelCallRecord> {
+    const result = await this.pool.query<ModelCallRow>(
+      `
+        UPDATE model_calls
+        SET status = 'succeeded',
+            model = $2,
+            finish_reason = $3,
+            input_tokens = $4,
+            output_tokens = $5,
+            total_tokens = $6,
+            error = NULL,
+            finished_at = $7,
+            updated_at = $7
+        WHERE id = $1 AND status = 'running'
+        RETURNING ${MODEL_CALL_COLUMNS}
+      `,
+      [
+        input.callId,
+        input.model,
+        input.finishReason,
+        input.inputTokens,
+        input.outputTokens,
+        input.totalTokens,
+        input.finishedAt,
+      ],
+    );
+    return this.requireUpdatedModelCall(input.callId, result.rows[0]);
+  }
+
+  async failModelCall(input: FailModelCallInput): Promise<ModelCallRecord> {
+    const result = await this.pool.query<ModelCallRow>(
+      `
+        UPDATE model_calls
+        SET status = 'failed',
+            input_tokens = $2,
+            output_tokens = $3,
+            total_tokens = $4,
+            error = $5::jsonb,
+            finished_at = $6,
+            updated_at = $6
+        WHERE id = $1 AND status = 'running'
+        RETURNING ${MODEL_CALL_COLUMNS}
+      `,
+      [
+        input.callId,
+        input.inputTokens,
+        input.outputTokens,
+        input.totalTokens,
+        encodeJson(input.error),
+        input.finishedAt,
+      ],
+    );
+    return this.requireUpdatedModelCall(input.callId, result.rows[0]);
+  }
+
   private async requireUpdatedStage(
     stageId: string,
     row: StageRow | undefined,
@@ -578,6 +712,26 @@ export class PostgresRuntimeStore implements RuntimeStore {
     }
 
     throw new Error(`Delivery ${deliveryId} is not running.`);
+  }
+
+  private async requireUpdatedModelCall(
+    callId: string,
+    row: ModelCallRow | undefined,
+  ): Promise<ModelCallRecord> {
+    if (row !== undefined) {
+      return mapModelCall(row);
+    }
+
+    const existing = await this.pool.query<{ status: ModelCallStatus }>(
+      "SELECT status FROM model_calls WHERE id = $1",
+      [callId],
+    );
+
+    if (existing.rows[0] === undefined) {
+      throw new Error(`Model call ${callId} does not exist.`);
+    }
+
+    throw new Error(`Model call ${callId} is not running.`);
   }
 }
 
@@ -698,6 +852,28 @@ function mapDelivery(row: DeliveryRow): DeliveryRecord {
   };
 }
 
+function mapModelCall(row: ModelCallRow): ModelCallRecord {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    ordinal: row.ordinal,
+    role: row.role,
+    providerId: row.provider_id,
+    requestHash: row.request_hash,
+    status: row.status,
+    model: row.model,
+    finishReason: row.finish_reason,
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    totalTokens: row.total_tokens,
+    error: row.error,
+    startedAt: timestamp(row.started_at),
+    finishedAt: nullableTimestamp(row.finished_at),
+    createdAt: timestamp(row.created_at),
+    updatedAt: timestamp(row.updated_at),
+  };
+}
+
 function dateText(value: Date | string): string {
   return value instanceof Date ? value.toISOString().slice(0, 10) : value;
 }
@@ -766,6 +942,26 @@ interface DeliveryRow extends QueryResultRow {
   status: DeliveryStatus;
   attempt: number;
   receipt: JsonValue | null;
+  error: SerializedError | null;
+  started_at: Date | string;
+  finished_at: Date | string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+}
+
+interface ModelCallRow extends QueryResultRow {
+  id: string;
+  run_id: string;
+  ordinal: number;
+  role: string;
+  provider_id: string;
+  request_hash: string;
+  status: ModelCallStatus;
+  model: string | null;
+  finish_reason: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
   error: SerializedError | null;
   started_at: Date | string;
   finished_at: Date | string | null;

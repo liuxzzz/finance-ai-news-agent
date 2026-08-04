@@ -2,6 +2,7 @@
 
 import { runPersistentAiReplay } from "./ai-runtime-command.js";
 import { runDemo } from "./demo.js";
+import { runPersistentAiLive } from "./live-runtime-command.js";
 import { migrateDatabase, runPersistentFixture, showRunStatus } from "./runtime-command.js";
 
 const command = process.argv[2] ?? "help";
@@ -15,6 +16,8 @@ try {
     await runPersistentFixture(process.argv.slice(3));
   } else if (command === "run-ai") {
     await runPersistentAiReplay(process.argv.slice(3));
+  } else if (command === "run-live") {
+    await runPersistentAiLive(process.argv.slice(3));
   } else if (command === "status") {
     await showRunStatus(process.argv[3]);
   } else {
@@ -35,12 +38,13 @@ function printHelp(): void {
       "  finance-ai-news-agent migrate              Apply PostgreSQL migrations",
       "  finance-ai-news-agent run [options]        Run/resume the persistent fixture workflow",
       "  finance-ai-news-agent run-ai [options]     Run/resume DeepSeek with replay evidence",
+      "  finance-ai-news-agent run-live [options]   Run/resume DeepSeek with MCP evidence",
       "  finance-ai-news-agent status <run-id>      Inspect a persisted run",
       "",
       "Run options:",
       "  --tenant <id>              Default: default",
       "  --report-date <YYYY-MM-DD> Default: today in AGENT_TIMEZONE",
-      "  --edition <name>           Default: daily (run), ai-replay-v1 (run-ai)",
+      "  --edition <name>           Default: daily / ai-replay-v1 / ai-live-v1",
       "  --topic <topic>            Default: Finance & AI",
       "  --max-revisions <count>    Default: 1",
       "  --dry-run                  Persist the artifact without delivery",

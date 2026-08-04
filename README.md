@@ -83,7 +83,7 @@ pnpm run:fixture -- --report-date 2026-08-04 --edition daily
 命令会从持久化的 Run/Stage 和 LangGraph checkpoint 恢复。`--dry-run` 会持久化制品但跳过发送；
 随后用相同参数移除 `--dry-run`，会发送已有制品而不会重新执行 Agent Graph。
 
-CLI 还支持 `status <run-id>` 查询 Run、Stage 和 Delivery 审计记录。当前 `run` 命令仍使用
+CLI 还支持 `status <run-id>` 查询 Run、Stage、Model Call 和 Delivery 审计记录。当前 `run` 命令仍使用
 Fixture Handler，目的是验证 Runtime，且不需要任何模型密钥。
 
 ### DeepSeek AI 回放
@@ -107,9 +107,43 @@ pnpm run:ai -- --report-date 2026-08-04 --edition ai-replay-v1 --dry-run
 Evidence 的 ID，最终 Markdown 中的来源 URL 由程序从 Evidence 确定性生成。根命令会自动读取
 可选的 `.env.local`；已经在 shell 中导出的环境变量也仍然可用。
 
-模型适配器关闭了隐藏的 HTTP 自动重试；每次结构化输出最多额外进行一次显式恢复调用，并记录在
-`modelUsage` 中。当前模型调用仍是 at-least-once：如果进程在模型返回后、LangGraph checkpoint
-前退出，恢复时可能再次调用并计费。生产级硬成本上限需要后续增加独立的持久化 Model Call Ledger。
+模型适配器关闭了隐藏的 HTTP 自动重试；每次结构化输出最多额外进行一次显式恢复调用。模型请求在
+发送前会原子写入 PostgreSQL `model_calls`，成功或失败后再记录模型、finish reason 和 Token。
+进程中断留下的 `running` 调用也会占用预算，因此恢复后不会绕过每个 Run 的硬请求上限。
+
+### DeepSeek + MCP 实时研究
+
+`run-live` 使用 DeepSeek Function Calling 选择 MCP 白名单工具。模型只决定调用的工具和参数；
+实际执行、参数校验、超时和结果大小限制由 Runtime/Gateway 控制。配置一个 Streamable HTTP MCP
+服务后运行：
+
+```bash
+# 仅在被 Git 忽略的 .env.local 中配置
+MCP_SERVER_URL=https://your-mcp-server.example/mcp
+MCP_ALLOWED_TOOLS=search_news,fetch_article
+MCP_BEARER_TOKEN=your-local-token
+MCP_MAX_TOOL_CALLS=4
+
+pnpm db:migrate
+pnpm run:live -- --report-date 2026-08-04 --edition ai-live-v1 --dry-run
+```
+
+远程 MCP 必须使用 HTTPS，本地 loopback 开发服务可以使用 HTTP。Gateway 默认拒绝未列入
+`MCP_ALLOWED_TOOLS` 的工具，并使用工具声明的 JSON Schema 在调用前校验参数。新闻工具需要返回
+以下结构化结果，URL 才能进入 Agent Evidence：
+
+```json
+{
+  "items": [
+    {
+      "id": "stable-source-id",
+      "title": "Source title",
+      "url": "https://source.example/article",
+      "excerpt": "Evidence excerpt"
+    }
+  ]
+}
+```
 
 ## Workspace
 
@@ -122,7 +156,7 @@ packages/
 plugins/
   model-ai-sdk/          AI SDK ModelProvider Adapter
   output-file/           本地 Markdown 输出
-  source-mcp/            官方 MCP SDK Client 骨架
+  source-mcp/            MCP Client、白名单 Gateway 与 HTTP 连接
   storage-postgres/      Run/Stage Repository、迁移与 LangGraph checkpoint
 presets/
   finance-ai/            Finance & AI 官方 Preset 占位
@@ -138,6 +172,7 @@ pnpm demo          # 构建并执行离线 Demo
 pnpm db:migrate    # 执行 PostgreSQL 版本化迁移
 pnpm run:fixture   # 执行/恢复持久化 Fixture Run
 pnpm run:ai       # 使用真实 DeepSeek 模型和合成回放证据
+pnpm run:live     # 使用 DeepSeek Function Calling 和 MCP Evidence
 pnpm studio        # 启动本地 Agent Server 和 Studio
 pnpm build         # 构建所有 workspace packages
 pnpm typecheck     # TypeScript 类型检查
@@ -158,8 +193,10 @@ pnpm check         # 完整 CI 检查
 - [x] 重复触发幂等、失败恢复、发布门禁和审计查询
 - [x] PostgreSQL LangGraph durable checkpoint
 - [x] DeepSeek 结构化编辑/审核、版本化 Prompt 和回放模式
+- [x] 持久化 Model Call Ledger 与跨进程硬请求预算
+- [x] DeepSeek Function Calling、受控 MCP Gateway 和 `run-live` 入口
 - [x] 单元测试与 CI
-- [ ] 实时 MCP 来源和飞书配置
+- [ ] 配置并验收真实 MCP 新闻来源和飞书输出
 - [ ] 在线评测基线与长期记忆实现
 
 当前代码分层、运行流程和目录职责见

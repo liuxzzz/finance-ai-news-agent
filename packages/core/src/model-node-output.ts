@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { EvidenceSchema } from "./agent-state.js";
+import { EvidenceSchema, ModelUsageSchema } from "./agent-state.js";
 
 const StableIdSchema = z
   .string()
@@ -18,6 +18,12 @@ export const ResearchNodeOutputSchema = z
     schemaVersion: z.literal("research.v1"),
     plan: z.array(z.string().min(1).max(200)).min(1).max(6),
     evidence: z.array(EvidenceSchema).max(24),
+    modelUsage: ModelUsageSchema.default(() => ({
+      requests: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    })),
   })
   .strict()
   .superRefine((value, context) => {

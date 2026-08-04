@@ -16,9 +16,12 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0"
+    "@finance-ai-news-agent/plugin-sdk": "workspace:*",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "ajv": "8.20.0"
   }
 }

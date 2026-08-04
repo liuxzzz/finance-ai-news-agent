@@ -20,6 +20,7 @@
     "lint": "eslint .",
     "run:ai": "pnpm build && node --env-file-if-exists=.env.local apps/cli/dist/index.js run-ai",
     "run:fixture": "pnpm build && node --env-file-if-exists=.env.local apps/cli/dist/index.js run",
+    "run:live": "pnpm build && node --env-file-if-exists=.env.local apps/cli/dist/index.js run-live",
     "studio": "langgraphjs dev",
     "test": "pnpm --recursive --if-present run test",
     "typecheck": "pnpm --recursive --if-present run typecheck"

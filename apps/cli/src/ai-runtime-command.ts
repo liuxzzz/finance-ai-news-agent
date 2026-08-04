@@ -30,6 +30,7 @@ export const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
 export const DEEPSEEK_THINKING_MODE = "disabled" as const;
 export const STRUCTURED_OUTPUT_ATTEMPTS = 2;
 export const MODEL_PROVIDER_MAX_RETRIES = 0;
+export const MAX_MODEL_REQUESTS_PER_RUN = 8;
 
 export interface DeepSeekRuntimeConfig {
   apiKey: string;
@@ -52,7 +53,9 @@ export async function runPersistentAiReplay(args: string[]): Promise<void> {
     const handlers = createModelAgentHandlers({
       model,
       research: replayResearch,
+      modelCallLedger: store,
       structuredOutputAttempts: STRUCTURED_OUTPUT_ATTEMPTS,
+      maxModelRequests: MAX_MODEL_REQUESTS_PER_RUN,
     });
     const graph = createAgentGraph(handlers, { checkpointer });
     const outputPath = resolvePersistentOutputPath(
@@ -162,6 +165,7 @@ export function createDeepSeekModelSnapshot(config: DeepSeekRuntimeConfig) {
     structuredOutput: "json_object+zod",
     structuredOutputAttempts: STRUCTURED_OUTPUT_ATTEMPTS,
     providerMaxRetries: MODEL_PROVIDER_MAX_RETRIES,
+    maxModelRequestsPerRun: MAX_MODEL_REQUESTS_PER_RUN,
     endpointFingerprint: createHash("sha256").update(config.baseURL).digest("hex").slice(0, 16),
   };
 }
