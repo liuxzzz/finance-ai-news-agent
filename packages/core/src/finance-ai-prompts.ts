@@ -80,6 +80,12 @@ function evidenceForPrompt(evidence: Evidence) {
     title: evidence.title,
     url: evidence.url,
     excerpt: evidence.excerpt.slice(0, 1000),
+    source: evidence.source ?? null,
+    sourceId: evidence.sourceId ?? null,
+    publishedAt: evidence.publishedAt ?? null,
+    canonicalUrl: evidence.canonicalUrl ?? evidence.url,
+    titleFingerprint: evidence.titleFingerprint ?? null,
+    clusterId: evidence.clusterId ?? null,
   };
 }
 

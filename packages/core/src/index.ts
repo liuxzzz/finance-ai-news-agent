@@ -30,6 +30,8 @@ export {
 
 export { InMemoryRuntimeStore } from "./in-memory-runtime-store.js";
 
+export { canonicalizeEvidenceUrl, normalizeAndClusterEvidence } from "./evidence-normalizer.js";
+
 export {
   CURATE_WRITE_PROMPT_V1,
   FINANCE_AI_PROMPT_VERSIONS,

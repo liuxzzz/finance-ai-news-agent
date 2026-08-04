@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
-  type McpGateway,
+  type ContentStore,
   type ModelCallRecord,
   type RuntimeStore,
   type SerializedError,
+  type ToolGateway,
   type ToolCallingModelProvider,
   type ToolCallingModelRequest,
   type ToolCallingModelResponse,
@@ -12,6 +13,7 @@ import {
 import { z } from "zod";
 
 import { EvidenceSchema, type AgentGraphStateValue, type ModelUsage } from "./agent-state.js";
+import { normalizeAndClusterEvidence, selectBalancedEvidence } from "./evidence-normalizer.js";
 import { ModelRequestBudgetExceededError, type ResearchProvider } from "./model-agent-handlers.js";
 
 export const NewsToolResultSchema = z
@@ -26,12 +28,15 @@ type ModelCallLedger = Pick<RuntimeStore, "startModelCall" | "completeModelCall"
 
 export interface CreateToolCallingResearchOptions {
   model: ToolCallingModelProvider;
-  gateway: McpGateway;
+  gateway: ToolGateway;
   modelCallLedger?: ModelCallLedger;
+  contentStore?: ContentStore;
   maxModelRequests?: number;
   maxToolCalls?: number;
   maxRounds?: number;
   maxEvidence?: number;
+  maxCandidateEvidence?: number;
+  historyLookbackDays?: number;
   timeoutMs?: number;
   now?: () => Date;
   generateId?: () => string;
@@ -48,6 +53,20 @@ export function createToolCallingResearchProvider(
   const maxToolCalls = boundedPositiveInteger(options.maxToolCalls ?? 4, "maxToolCalls", 16);
   const maxRounds = positiveInteger(options.maxRounds ?? 3, "maxRounds");
   const maxEvidence = boundedPositiveInteger(options.maxEvidence ?? 24, "maxEvidence", 24);
+  const maxCandidateEvidence = boundedPositiveInteger(
+    options.maxCandidateEvidence ?? maxEvidence,
+    "maxCandidateEvidence",
+    24,
+  );
+  const historyLookbackDays = boundedPositiveInteger(
+    options.historyLookbackDays ?? 7,
+    "historyLookbackDays",
+    365,
+  );
+
+  if (maxCandidateEvidence < maxEvidence) {
+    throw new Error("maxCandidateEvidence must be greater than or equal to maxEvidence.");
+  }
   const timeoutMs = positiveInteger(options.timeoutMs ?? 60_000, "timeoutMs");
   const now = options.now ?? (() => new Date());
   const generateId = options.generateId ?? randomUUID;
@@ -135,7 +154,7 @@ export function createToolCallingResearchProvider(
         callSignatures.add(signature);
         toolCallCount += 1;
         executedCalls.push(toolCall.name);
-        const result = await options.gateway.callTool(toolCall);
+        const result = await options.gateway.callTool(toolCall, { runId: state.runId });
 
         if (result.isError) {
           transcript.push({
@@ -154,7 +173,7 @@ export function createToolCallingResearchProvider(
         });
 
         for (const evidence of parsed.items) {
-          if (evidenceByUrl.size >= maxEvidence) {
+          if (evidenceByUrl.size >= maxCandidateEvidence) {
             break;
           }
 
@@ -173,15 +192,77 @@ export function createToolCallingResearchProvider(
         }
       }
 
-      if (toolCallCount >= maxToolCalls || evidenceByUrl.size >= maxEvidence) {
+      if (toolCallCount >= maxToolCalls || evidenceByUrl.size >= maxCandidateEvidence) {
         break;
       }
     }
 
+    const normalizedCandidates = normalizeAndClusterEvidence(
+      [...evidenceByUrl.values()],
+      maxCandidateEvidence,
+    );
+    const previouslySeen =
+      options.contentStore === undefined
+        ? []
+        : await options.contentStore.findPreviouslySeenContent({
+            runId: state.runId,
+            fingerprints: normalizedCandidates.flatMap((evidence) =>
+              evidence.fingerprint === undefined ? [] : [evidence.fingerprint],
+            ),
+            titleFingerprints: normalizedCandidates.flatMap((evidence) =>
+              evidence.titleFingerprint === undefined ? [] : [evidence.titleFingerprint],
+            ),
+            lookbackDays: historyLookbackDays,
+          });
+    const seenFingerprints = new Set(previouslySeen.map((item) => item.fingerprint));
+    const seenTitleFingerprints = new Set(previouslySeen.map((item) => item.titleFingerprint));
+    const unseenCandidates = normalizedCandidates.filter(
+      (evidence) =>
+        evidence.fingerprint !== undefined &&
+        evidence.titleFingerprint !== undefined &&
+        !seenFingerprints.has(evidence.fingerprint) &&
+        !seenTitleFingerprints.has(evidence.titleFingerprint),
+    );
+    const historicalDuplicateCount = normalizedCandidates.length - unseenCandidates.length;
+    const normalizedEvidence = selectBalancedEvidence(unseenCandidates, maxEvidence);
+
+    if (options.contentStore !== undefined) {
+      const createdAt = now().toISOString();
+      await options.contentStore.saveNormalizedContentItems(
+        normalizedEvidence.map((evidence) => {
+          if (
+            evidence.canonicalUrl === undefined ||
+            evidence.fingerprint === undefined ||
+            evidence.titleFingerprint === undefined ||
+            evidence.clusterId === undefined
+          ) {
+            throw new Error(`Normalized evidence metadata is missing for ${evidence.id}.`);
+          }
+
+          return {
+            id: normalizedContentId(state.runId, evidence.id),
+            runId: state.runId,
+            evidenceId: evidence.id,
+            sourceId: evidence.sourceId ?? null,
+            source: evidence.source ?? null,
+            url: evidence.url,
+            canonicalUrl: evidence.canonicalUrl,
+            title: evidence.title,
+            excerpt: evidence.excerpt,
+            publishedAt: evidence.publishedAt ?? null,
+            fingerprint: evidence.fingerprint,
+            titleFingerprint: evidence.titleFingerprint,
+            clusterId: evidence.clusterId,
+            createdAt,
+          };
+        }),
+      );
+    }
+
     return {
       schemaVersion: "research.v1",
-      plan: researchPlan(state.topic, executedCalls),
-      evidence: [...evidenceByUrl.values()].slice(0, maxEvidence),
+      plan: researchPlan(state.topic, executedCalls, historicalDuplicateCount),
+      evidence: normalizedEvidence,
       modelUsage: usage,
     };
   };
@@ -222,12 +303,23 @@ function summarizeToolResult(result: NewsToolResult): NewsToolResult {
   return {
     items: result.items.map((item) => ({
       ...item,
-      excerpt: item.excerpt.slice(0, 1_000),
+      excerpt: item.excerpt.slice(0, 200),
     })),
   };
 }
 
-function researchPlan(topic: string, executedCalls: string[]): string[] {
+function normalizedContentId(runId: string, evidenceId: string): string {
+  return `normalized-${createHash("sha256")
+    .update(`${runId}\u0000${evidenceId}`)
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
+function researchPlan(
+  topic: string,
+  executedCalls: string[],
+  historicalDuplicateCount: number,
+): string[] {
   const uniqueTools = [...new Set(executedCalls)];
   return [
     `围绕「${topic}」使用受控 Function Calling 检索证据`,
@@ -235,6 +327,9 @@ function researchPlan(topic: string, executedCalls: string[]): string[] {
       ? `已调用工具：${uniqueTools.join(", ")}`
       : "模型判断无需新增工具调用，保留已有证据",
     "仅采用通过 Evidence Schema 和安全 URL 校验的结构化工具结果",
+    historicalDuplicateCount > 0
+      ? `已过滤 ${historicalDuplicateCount} 条近期已发布内容`
+      : "未发现近期重复内容",
   ];
 }
 

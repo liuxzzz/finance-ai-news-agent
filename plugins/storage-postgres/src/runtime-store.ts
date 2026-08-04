@@ -5,6 +5,7 @@ import type {
   CompleteDeliveryInput,
   CompleteModelCallInput,
   CompleteRunStageInput,
+  ContentStore,
   CreateRunInput,
   CreateRunResult,
   DeliveryRecord,
@@ -12,11 +13,15 @@ import type {
   FailDeliveryInput,
   FailModelCallInput,
   FailRunStageInput,
+  FindPreviouslySeenContentInput,
   FinishRunInput,
   JsonObject,
   JsonValue,
   ModelCallRecord,
   ModelCallStatus,
+  NormalizedContentItemInput,
+  NormalizedContentItemRecord,
+  PreviouslySeenContentRecord,
   RunIdentity,
   RunLock,
   RunRecord,
@@ -24,6 +29,11 @@ import type {
   RunStageStatus,
   RunStatus,
   RuntimeStore,
+  SourceAuditStore,
+  SourceRunRecord,
+  SourceRunStatus,
+  RawSourceItemRecord,
+  RecordSourceCollectionInput,
   SaveArtifactInput,
   SerializedError,
   SkipRunStageInput,
@@ -61,8 +71,23 @@ const MODEL_CALL_COLUMNS = `
   started_at, finished_at, created_at, updated_at
 `;
 
+const SOURCE_RUN_COLUMNS = `
+  id, run_id, source_id, source_url_fingerprint, attempt, status,
+  item_count, error, started_at, finished_at, created_at
+`;
+
+const RAW_SOURCE_ITEM_COLUMNS = `
+  id, run_id, source_run_id, source_id, external_id, url, title, excerpt,
+  published_at, collected_at, content_hash, raw, created_at
+`;
+
+const NORMALIZED_CONTENT_COLUMNS = `
+  id, run_id, evidence_id, source_id, source, url, canonical_url, title,
+  excerpt, published_at, fingerprint, title_fingerprint, cluster_id, created_at
+`;
+
 /** PostgreSQL implementation of the deterministic runtime persistence boundary. */
-export class PostgresRuntimeStore implements RuntimeStore {
+export class PostgresRuntimeStore implements RuntimeStore, SourceAuditStore, ContentStore {
   constructor(private readonly pool: Pool) {}
 
   async createOrGetRun(input: CreateRunInput): Promise<CreateRunResult> {
@@ -674,6 +699,266 @@ export class PostgresRuntimeStore implements RuntimeStore {
     return this.requireUpdatedModelCall(input.callId, result.rows[0]);
   }
 
+  async recordSourceCollection(input: RecordSourceCollectionInput): Promise<SourceRunRecord> {
+    if (input.status === "failed" && input.items.length > 0) {
+      throw new Error("A failed source collection cannot persist successful items.");
+    }
+
+    if (
+      input.items.some(
+        (item) =>
+          item.runId !== input.runId ||
+          item.sourceRunId !== input.id ||
+          item.sourceId !== input.sourceId,
+      )
+    ) {
+      throw new Error("Raw source items must match their source collection identity.");
+    }
+
+    return withTransaction(this.pool, async (client) => {
+      const run = await client.query<{ id: string }>(
+        "SELECT id FROM runs WHERE id = $1 FOR UPDATE",
+        [input.runId],
+      );
+
+      if (run.rows[0] === undefined) {
+        throw new Error(`Run ${input.runId} does not exist.`);
+      }
+
+      const attempts = await client.query<{ next_attempt: number | string }>(
+        `
+          SELECT COALESCE(MAX(attempt), 0) + 1 AS next_attempt
+          FROM source_runs
+          WHERE run_id = $1 AND source_id = $2
+        `,
+        [input.runId, input.sourceId],
+      );
+      const attempt = Number(attempts.rows[0]?.next_attempt ?? 1);
+      const inserted = await client.query<SourceRunRow>(
+        `
+          INSERT INTO source_runs (
+            id, run_id, source_id, source_url_fingerprint, attempt, status,
+            item_count, error, started_at, finished_at, created_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $9)
+          RETURNING ${SOURCE_RUN_COLUMNS}
+        `,
+        [
+          input.id,
+          input.runId,
+          input.sourceId,
+          input.sourceUrlFingerprint,
+          attempt,
+          input.status,
+          input.itemCount,
+          input.error === null ? null : encodeJson(input.error),
+          input.startedAt,
+          input.finishedAt,
+        ],
+      );
+
+      for (const item of input.items) {
+        await client.query(
+          `
+            INSERT INTO raw_source_items (
+              id, run_id, source_run_id, source_id, external_id, url, title,
+              excerpt, published_at, collected_at, content_hash, raw, created_at
+            )
+            VALUES (
+              $1, $2, $3, $4, $5, $6, $7,
+              $8, $9, $10, $11, $12::jsonb, $10
+            )
+            ON CONFLICT (run_id, url) DO NOTHING
+          `,
+          [
+            item.id,
+            item.runId,
+            item.sourceRunId,
+            item.sourceId,
+            item.externalId,
+            item.url,
+            item.title,
+            item.excerpt,
+            item.publishedAt,
+            item.collectedAt,
+            item.contentHash,
+            encodeJson(item.raw),
+          ],
+        );
+      }
+
+      return mapSourceRun(requireRow(inserted.rows[0], "Recorded source collection"));
+    });
+  }
+
+  async listSourceRuns(runId: string): Promise<SourceRunRecord[]> {
+    const result = await this.pool.query<SourceRunRow>(
+      `
+        SELECT ${SOURCE_RUN_COLUMNS}
+        FROM source_runs
+        WHERE run_id = $1
+        ORDER BY created_at ASC, source_id ASC, attempt ASC
+      `,
+      [runId],
+    );
+    return result.rows.map(mapSourceRun);
+  }
+
+  async listRawSourceItems(runId: string): Promise<RawSourceItemRecord[]> {
+    const result = await this.pool.query<RawSourceItemRow>(
+      `
+        SELECT ${RAW_SOURCE_ITEM_COLUMNS}
+        FROM raw_source_items
+        WHERE run_id = $1
+        ORDER BY published_at DESC, source_id ASC, id ASC
+      `,
+      [runId],
+    );
+    return result.rows.map(mapRawSourceItem);
+  }
+
+  async saveNormalizedContentItems(
+    items: readonly NormalizedContentItemInput[],
+  ): Promise<NormalizedContentItemRecord[]> {
+    if (items.length === 0) {
+      return [];
+    }
+
+    const runId = items[0]!.runId;
+
+    if (items.some((item) => item.runId !== runId)) {
+      throw new Error("Normalized content items must belong to one run.");
+    }
+
+    return withTransaction(this.pool, async (client) => {
+      const run = await client.query<{ id: string }>("SELECT id FROM runs WHERE id = $1", [runId]);
+
+      if (run.rows[0] === undefined) {
+        throw new Error(`Run ${runId} does not exist.`);
+      }
+
+      for (const item of items) {
+        await client.query(
+          `
+            INSERT INTO normalized_content_items (
+              id, run_id, evidence_id, source_id, source, url, canonical_url,
+              title, excerpt, published_at, fingerprint, title_fingerprint, cluster_id, created_at
+            )
+            VALUES (
+              $1, $2, $3, $4, $5, $6, $7,
+              $8, $9, $10, $11, $12, $13, $14
+            )
+            ON CONFLICT (run_id, evidence_id) DO NOTHING
+          `,
+          [
+            item.id,
+            item.runId,
+            item.evidenceId,
+            item.sourceId,
+            item.source,
+            item.url,
+            item.canonicalUrl,
+            item.title,
+            item.excerpt,
+            item.publishedAt,
+            item.fingerprint,
+            item.titleFingerprint,
+            item.clusterId,
+            item.createdAt,
+          ],
+        );
+      }
+
+      const stored = await client.query<NormalizedContentRow>(
+        `
+          SELECT ${NORMALIZED_CONTENT_COLUMNS}
+          FROM normalized_content_items
+          WHERE run_id = $1 AND evidence_id = ANY($2::text[])
+          ORDER BY published_at DESC NULLS LAST, evidence_id ASC
+        `,
+        [runId, items.map((item) => item.evidenceId)],
+      );
+      const records = stored.rows.map(mapNormalizedContentItem);
+
+      for (const item of items) {
+        const existing = records.find((record) => record.evidenceId === item.evidenceId);
+
+        if (existing === undefined || !normalizedContentMatches(existing, item)) {
+          throw new Error(`Normalized content conflict for ${item.runId}/${item.evidenceId}.`);
+        }
+      }
+
+      return records;
+    });
+  }
+
+  async listNormalizedContentItems(runId: string): Promise<NormalizedContentItemRecord[]> {
+    const result = await this.pool.query<NormalizedContentRow>(
+      `
+        SELECT ${NORMALIZED_CONTENT_COLUMNS}
+        FROM normalized_content_items
+        WHERE run_id = $1
+        ORDER BY published_at DESC NULLS LAST, evidence_id ASC
+      `,
+      [runId],
+    );
+    return result.rows.map(mapNormalizedContentItem);
+  }
+
+  async findPreviouslySeenContent(
+    input: FindPreviouslySeenContentInput,
+  ): Promise<PreviouslySeenContentRecord[]> {
+    if (
+      !Number.isSafeInteger(input.lookbackDays) ||
+      input.lookbackDays < 1 ||
+      input.lookbackDays > 365
+    ) {
+      throw new Error("Historical content lookback must be an integer from 1 to 365 days.");
+    }
+
+    if (input.fingerprints.length === 0 && input.titleFingerprints.length === 0) {
+      return [];
+    }
+
+    const result = await this.pool.query<PreviouslySeenContentRow>(
+      `
+        WITH current_run AS (
+          SELECT tenant_id, report_date, topic
+          FROM runs
+          WHERE id = $1
+        )
+        SELECT DISTINCT
+          content.run_id,
+          content.evidence_id,
+          prior.report_date,
+          content.fingerprint,
+          content.title_fingerprint
+        FROM normalized_content_items AS content
+        JOIN runs AS prior ON prior.id = content.run_id
+        CROSS JOIN current_run AS current
+        WHERE prior.tenant_id = current.tenant_id
+          AND prior.topic = current.topic
+          AND prior.report_date::date < current.report_date::date
+          AND prior.report_date::date >= current.report_date::date - $2::integer
+          AND prior.status IN ('succeeded', 'partial')
+          AND (
+            content.fingerprint = ANY($3::text[])
+            OR content.title_fingerprint = ANY($4::text[])
+          )
+        ORDER BY prior.report_date DESC, content.run_id ASC, content.evidence_id ASC
+      `,
+      [input.runId, input.lookbackDays, input.fingerprints, input.titleFingerprints],
+    );
+
+    return result.rows.map((row) => ({
+      runId: row.run_id,
+      evidenceId: row.evidence_id,
+      reportDate: dateText(row.report_date),
+      fingerprint: row.fingerprint,
+      titleFingerprint: row.title_fingerprint,
+    }));
+  }
+
   private async requireUpdatedStage(
     stageId: string,
     row: StageRow | undefined,
@@ -874,6 +1159,78 @@ function mapModelCall(row: ModelCallRow): ModelCallRecord {
   };
 }
 
+function mapSourceRun(row: SourceRunRow): SourceRunRecord {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    sourceId: row.source_id,
+    sourceUrlFingerprint: row.source_url_fingerprint,
+    attempt: row.attempt,
+    status: row.status,
+    itemCount: row.item_count,
+    error: row.error,
+    startedAt: timestamp(row.started_at),
+    finishedAt: timestamp(row.finished_at),
+    createdAt: timestamp(row.created_at),
+  };
+}
+
+function mapRawSourceItem(row: RawSourceItemRow): RawSourceItemRecord {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    sourceRunId: row.source_run_id,
+    sourceId: row.source_id,
+    externalId: row.external_id,
+    url: row.url,
+    title: row.title,
+    excerpt: row.excerpt,
+    publishedAt: timestamp(row.published_at),
+    collectedAt: timestamp(row.collected_at),
+    contentHash: row.content_hash,
+    raw: row.raw,
+    createdAt: timestamp(row.created_at),
+  };
+}
+
+function mapNormalizedContentItem(row: NormalizedContentRow): NormalizedContentItemRecord {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    evidenceId: row.evidence_id,
+    sourceId: row.source_id,
+    source: row.source,
+    url: row.url,
+    canonicalUrl: row.canonical_url,
+    title: row.title,
+    excerpt: row.excerpt,
+    publishedAt: nullableTimestamp(row.published_at),
+    fingerprint: row.fingerprint,
+    titleFingerprint: row.title_fingerprint,
+    clusterId: row.cluster_id,
+    createdAt: timestamp(row.created_at),
+  };
+}
+
+function normalizedContentMatches(
+  stored: NormalizedContentItemRecord,
+  input: NormalizedContentItemInput,
+): boolean {
+  return (
+    stored.id === input.id &&
+    stored.sourceId === input.sourceId &&
+    stored.source === input.source &&
+    stored.url === input.url &&
+    stored.canonicalUrl === input.canonicalUrl &&
+    stored.title === input.title &&
+    stored.excerpt === input.excerpt &&
+    stored.publishedAt === input.publishedAt &&
+    stored.fingerprint === input.fingerprint &&
+    stored.titleFingerprint === input.titleFingerprint &&
+    stored.clusterId === input.clusterId
+  );
+}
+
 function dateText(value: Date | string): string {
   return value instanceof Date ? value.toISOString().slice(0, 10) : value;
 }
@@ -967,4 +1324,59 @@ interface ModelCallRow extends QueryResultRow {
   finished_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+interface SourceRunRow extends QueryResultRow {
+  id: string;
+  run_id: string;
+  source_id: string;
+  source_url_fingerprint: string;
+  attempt: number;
+  status: SourceRunStatus;
+  item_count: number;
+  error: SerializedError | null;
+  started_at: Date | string;
+  finished_at: Date | string;
+  created_at: Date | string;
+}
+
+interface RawSourceItemRow extends QueryResultRow {
+  id: string;
+  run_id: string;
+  source_run_id: string;
+  source_id: string;
+  external_id: string | null;
+  url: string;
+  title: string;
+  excerpt: string;
+  published_at: Date | string;
+  collected_at: Date | string;
+  content_hash: string;
+  raw: JsonObject;
+  created_at: Date | string;
+}
+
+interface NormalizedContentRow extends QueryResultRow {
+  id: string;
+  run_id: string;
+  evidence_id: string;
+  source_id: string | null;
+  source: string | null;
+  url: string;
+  canonical_url: string;
+  title: string;
+  excerpt: string;
+  published_at: Date | string | null;
+  fingerprint: string;
+  title_fingerprint: string;
+  cluster_id: string;
+  created_at: Date | string;
+}
+
+interface PreviouslySeenContentRow extends QueryResultRow {
+  run_id: string;
+  evidence_id: string;
+  report_date: Date | string;
+  fingerprint: string;
+  title_fingerprint: string;
 }

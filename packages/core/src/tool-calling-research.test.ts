@@ -1,7 +1,10 @@
 import type {
-  McpGateway,
+  ContentStore,
   ModelResponse,
+  NormalizedContentItemInput,
+  NormalizedContentItemRecord,
   PluginManifest,
+  ToolGateway,
   ToolCallingModelProvider,
   ToolCallingModelRequest,
   ToolCallingModelResponse,
@@ -51,11 +54,13 @@ describe("tool-calling research", () => {
       isError: false,
     });
     const ledger = new InMemoryRuntimeStore();
+    const contentStore = new RecordingContentStore();
     await prepareLedgerRun(ledger);
     const research = createToolCallingResearchProvider({
       model,
       gateway,
       modelCallLedger: ledger,
+      contentStore,
       maxModelRequests: 4,
       generateId: sequentialIds(),
       now: sequentialClock(),
@@ -83,6 +88,69 @@ describe("tool-calling research", () => {
       "succeeded",
       "succeeded",
     ]);
+    expect(contentStore.items).toEqual([
+      expect.objectContaining({
+        runId: "research-run",
+        evidenceId: "news-1",
+        canonicalUrl: "https://example.com/news/ai-infrastructure",
+        fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        titleFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+        clusterId: expect.stringMatching(/^cluster-/),
+      }),
+    ]);
+  });
+
+  it("filters evidence already published during the historical lookback", async () => {
+    const model = new ReplayToolCallingModel([
+      {
+        text: "",
+        model: "replay-model",
+        finishReason: "tool-calls",
+        toolCalls: [
+          {
+            id: "call-history",
+            name: "search_news",
+            arguments: { query: "AI", limit: 2 },
+          },
+        ],
+      },
+    ]);
+    const gateway = new ReplayGateway({
+      content: {
+        items: [
+          {
+            id: "news-newer-seen",
+            title: "Previously published headline",
+            url: "https://example.com/news/seen",
+            excerpt: "Already sent yesterday.",
+            publishedAt: "2026-08-04T11:00:00.000Z",
+          },
+          {
+            id: "news-new",
+            title: "New headline",
+            url: "https://example.com/news/new",
+            excerpt: "This one has not been sent.",
+            publishedAt: "2026-08-04T10:00:00.000Z",
+          },
+        ],
+      },
+      isError: false,
+    });
+    const contentStore = new RecordingContentStore(true);
+    const research = createToolCallingResearchProvider({
+      model,
+      gateway,
+      contentStore,
+      maxToolCalls: 1,
+      maxEvidence: 2,
+      historyLookbackDays: 7,
+    });
+
+    const output = await research(initialState());
+
+    expect(output.evidence.map((item) => item.id)).toEqual(["news-new"]);
+    expect(contentStore.items.map((item) => item.evidenceId)).toEqual(["news-new"]);
+    expect(output.plan).toContain("已过滤 1 条近期已发布内容");
   });
 
   it("rejects unsafe URLs returned by a tool", async () => {
@@ -146,7 +214,7 @@ class ReplayToolCallingModel implements ToolCallingModelProvider {
   }
 }
 
-class ReplayGateway implements McpGateway {
+class ReplayGateway implements ToolGateway {
   readonly calls: ToolCallingModelResponse["toolCalls"] = [];
 
   constructor(private readonly result: ToolResult) {}
@@ -172,6 +240,42 @@ class ReplayGateway implements McpGateway {
   async callTool(call: ToolCallingModelResponse["toolCalls"][number]) {
     this.calls.push(call);
     return this.result;
+  }
+}
+
+class RecordingContentStore implements ContentStore {
+  readonly items: NormalizedContentItemInput[] = [];
+
+  constructor(private readonly matchFirstCandidate = false) {}
+
+  async saveNormalizedContentItems(
+    items: readonly NormalizedContentItemInput[],
+  ): Promise<NormalizedContentItemRecord[]> {
+    this.items.push(...structuredClone(items));
+    return structuredClone(items);
+  }
+
+  async listNormalizedContentItems(): Promise<NormalizedContentItemRecord[]> {
+    return structuredClone(this.items);
+  }
+
+  async findPreviouslySeenContent(input: {
+    fingerprints: readonly string[];
+    titleFingerprints: readonly string[];
+  }) {
+    if (!this.matchFirstCandidate || input.fingerprints[0] === undefined) {
+      return [];
+    }
+
+    return [
+      {
+        runId: "prior-run",
+        evidenceId: "prior-evidence",
+        reportDate: "2026-08-03",
+        fingerprint: input.fingerprints[0],
+        titleFingerprint: input.titleFingerprints[0]!,
+      },
+    ];
   }
 }
 

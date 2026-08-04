@@ -19,6 +19,29 @@ export const EvidenceSchema = z
         "Evidence URLs must be safe HTTP(S) URLs without credentials or control characters.",
       ),
     excerpt: z.string().min(1).max(4000),
+    source: z.string().min(1).max(120).optional(),
+    sourceId: z.string().min(1).max(64).optional(),
+    publishedAt: z
+      .string()
+      .refine(
+        (value) => Number.isFinite(Date.parse(value)),
+        "publishedAt must be a valid date-time.",
+      )
+      .optional(),
+    canonicalUrl: z
+      .string()
+      .url()
+      .refine(isSafeEvidenceUrl, "canonicalUrl must be a safe HTTP(S) URL.")
+      .optional(),
+    fingerprint: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    titleFingerprint: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    clusterId: AgentEntityIdSchema.optional(),
   })
   .strict();
 

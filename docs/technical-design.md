@@ -21,7 +21,7 @@ AI 不是流水线末端的摘要组件，而是产品的语义决策核心：
 | 问题类型                                     | 默认负责人             |
 | -------------------------------------------- | ---------------------- |
 | 研究方向、查询扩展、语义理解、价值判断、写作 | AI 节点                |
-| MCP 协议、权限、Schema、超时、幂等、事务     | 确定性运行时           |
+| 来源协议、权限、Schema、超时、幂等、事务     | 确定性运行时           |
 | 事实一致性、引用完整性、发布质量             | Review 节点 + 程序校验 |
 | 模型或 Prompt 是否变好                       | 离线评测 + 线上反馈    |
 
@@ -31,10 +31,10 @@ AI 不是流水线末端的摘要组件，而是产品的语义决策核心：
 
 - Core、Agent Runtime、Memory、CLI 和 Plugin SDK 均以开放源码交付，不依赖私有控制平面才能运行；
 - 支持自行托管，默认 Docker Compose 即可启动，遥测默认关闭；
-- LLM、Embedding、MCP 来源、存储和输出渠道全部通过公开 Port 或 Plugin 接口替换；
+- LLM、Embedding、新闻来源、存储和输出渠道全部通过公开 Port 或 Plugin 接口替换；
 - 核心流程不绑定某一家模型、云、数据库托管服务或消息平台；
 - Core 保持领域中立，“金融 + AI”以官方 `finance-ai` Preset 提供主题、角色指令、来源建议、栏目和评测集；
-- 仓库内提供示例插件、模拟 MCP Server、脱敏 Fixture 和离线回放，让贡献者无需商业账号即可开发；
+- 仓库内提供示例插件、RSS Fixture、脱敏 Fixture 和离线回放，让贡献者无需商业账号即可开发；
 - 公共接口使用语义化版本，插件兼容性通过契约测试保证；
 - 许可证、依赖许可证审计、贡献指南、安全策略和发布流程从 Phase 0 建立。
 
@@ -47,7 +47,7 @@ AI 不是流水线末端的摘要组件，而是产品的语义决策核心：
 - MVP 由 `Research`、`Curate & Write`、`Review` 三个 AI 节点承担六种逻辑职责，避免过早拆分模型调用；
 - AI 节点可在阶段内进行受预算约束的规划、工具选择和修订循环；
 - 确定性运行时负责阶段边界、状态持久化、重试、幂等、权限和审计；
-- MCP 连接器负责访问外部平台，但只允许调用配置白名单内的工具；
+- Source Connector 直接访问配置的 RSS/API；模型只能调用应用暴露的只读逻辑工具；
 - Model Gateway 支持不同商业或本地模型，并按 AI 节点或能力选择模型；
 - PostgreSQL 是事实与运行状态的主存储，`pgvector` 支持跨日相似检索；
 - 记忆不是独立的尾部步骤，而是一个横跨收集、整理、输出的能力平面；
@@ -60,29 +60,30 @@ MVP 推荐技术栈：
 - 包管理：pnpm；
 - Agent 编排：LangGraph.js，仅用于 `packages/core` 内部的 AI 节点图、分支和 checkpoint；
 - 数据 Schema：Zod；
-- MCP：官方 TypeScript SDK，支持 `stdio` 与 Streamable HTTP 两种传输；
+- 实时来源：`rss-parser` 直接读取 RSS，后续来源通过 `SourceConnector` 扩展；
+- 可选互操作：官方 MCP TypeScript SDK 适配器，不作为核心新闻采集依赖；
 - 数据库：PostgreSQL + `pgvector`；
 - 模型：通过 `ModelProvider` 和 `ModelRouter` 封装，底层可使用 AI SDK；至少提供一个云模型示例和一个 OpenAI-compatible 本地模型示例；
 - 调度：云定时任务或系统 cron 触发 CLI；不在应用进程内维护定时器；
-- 部署：一个 Agent Worker 容器 + PostgreSQL，MCP Server 按平台独立部署或由 Worker 拉起；
+- 部署：一个 Agent Worker 容器 + PostgreSQL；Worker 直接访问已配置的只读新闻来源；
 - 可观测性：结构化日志、OpenTelemetry Trace、基础指标与运行审计表。
 
 首期不引入 Kafka、Redis、Temporal 或分布式多 Agent 基础设施。三个 AI 节点运行在同一 Runtime 和进程内，可以复用同一个模型，不代表三个独立 Agent 服务。每天一次的任务量不足以抵消分布式组件的维护成本。若后续演进为高频、多租户或大量长任务，再将当前持久化工作流替换为专业工作流引擎。
 
-MCP SDK 处于持续演进中，实现时应锁定经过验证的依赖版本，升级前运行全部连接器契约测试，不能在生产构建中自动漂移到最新版本。
+第三方来源 SDK 和解析器应锁定经过验证的依赖版本，升级前运行全部连接器契约测试，不能在生产构建中自动漂移到最新版本。
 
 ## 2. 需求与边界
 
 ### 2.1 核心目标
 
 1. 每天在配置的时区和时间触发一次。
-2. 通过多个平台的 MCP 工具获取金融市场和 AI 领域信息。
+2. 通过多个 RSS/API 来源获取金融市场和 AI 领域信息。
 3. 对原始信息做标准化、过滤、去重、聚类、排序和摘要。
 4. 生成有来源、有优先级、可快速阅读的每日简报。
-5. 通过飞书 MCP 发送简报，并记录发送结果。
+5. 通过 Output Plugin 发送简报，并记录发送结果。
 6. 使用历史信息改善下一次收集、判断新旧事件、续写事件进展并适配用户偏好。
 7. 任意一次运行都可查询、审计、重试和手动重放。
-8. 可替换模型、MCP 来源、存储和输出渠道，不因默认实现产生供应商锁定。
+8. 可替换模型、新闻来源、存储和输出渠道，不因默认实现产生供应商锁定。
 9. 社区贡献者可以完全在本地使用模拟数据运行、测试和开发插件。
 
 ### 2.2 非目标
@@ -126,15 +127,15 @@ flowchart TB
 
     subgraph Runtime["确定性执行层"]
       WF[Workflow / Budget / Policy]
-      MCP[MCP Gateway + Plugin Registry]
+      SRC[Source Tool Gateway + Plugin Registry]
       OUT[Output Plugin Registry]
       MEM[Memory Service]
     end
 
     RT <--> Runtime
-    MCP --> P1[资讯平台 MCP]
-    MCP --> P2[搜索/社区 MCP]
-    MCP --> P3[金融数据 MCP]
+    SRC --> P1[RSS Feed]
+    SRC --> P2[新闻 / 搜索 API]
+    SRC -.可选互操作.-> P3[MCP 工具]
     OUT --> P4[飞书 / 文件 / 其他渠道]
     MEM <--> DB[(PostgreSQL + pgvector)]
     WF <--> DB
@@ -148,7 +149,7 @@ flowchart TB
 
 外部副作用集中在两个边界：
 
-- 收集边界：只读 MCP 调用；
+- 收集边界：只读 RSS/API 调用；
 - 输出边界：Output Plugin 发送。
 
 中间整理流程全部以数据库中的不可变输入运行。任一 Agent 节点都可以使用 Fixture 离线重放，这是效果评测和开源贡献的共同基础。
@@ -161,7 +162,7 @@ sequenceDiagram
     participant Runtime as Agent Runtime
     participant DB as PostgreSQL
     participant Research as Research
-    participant MCP as MCP Sources
+    participant Sources as RSS / API Sources
     participant Compose as Curate & Write
     participant Review as Review
     participant Memory as Memory Service
@@ -172,9 +173,9 @@ sequenceDiagram
     Runtime->>DB: 读取记忆、偏好与来源状态
     Runtime->>Research: 主题、历史覆盖和授权工具
     loop 每个主题，预算内迭代
-      Research->>Runtime: 结构化 MCP Tool Plan
-      Runtime->>MCP: 权限校验后并发执行
-      MCP-->>Runtime: 原始条目
+      Research->>Runtime: 结构化 Source Tool Plan
+      Runtime->>Sources: 参数校验后并发读取
+      Sources-->>Runtime: 原始条目
       Runtime->>DB: 保存 Raw Items 与检查点
       Runtime->>Research: 返回证据覆盖与缺口
     end
@@ -197,7 +198,7 @@ sequenceDiagram
 | 阶段             | 输入                           | 输出                               | 是否允许外部副作用 |
 | ---------------- | ------------------------------ | ---------------------------------- | ------------------ |
 | `PREPARE`        | 运行日期、版本化配置、历史记忆 | Run、配置快照、研究上下文          | 否                 |
-| `COLLECT`        | Research 工具计划、来源游标    | 原始条目、证据覆盖、来源执行记录   | 只读 MCP           |
+| `COLLECT`        | Research 工具计划、来源游标    | 原始条目、证据覆盖、来源执行记录   | 只读 RSS/API       |
 | `NORMALIZE`      | 原始条目                       | 标准化条目、实体、指纹             | 否                 |
 | `CURATE_COMPOSE` | 标准化条目、历史记忆、偏好     | 事件簇、价值判断、结构化简报、制品 | 仅模型调用         |
 | `REVIEW`         | 结构化简报、证据集合           | Review 报告、发布或修订路由        | 仅模型调用         |
@@ -217,7 +218,7 @@ sequenceDiagram
 - 为每个 AI 节点分配 token、工具调用次数、时间和修订轮数预算；
 - 判断重试、降级、停止发布或继续部分发布；
 - 传递统一的 `run_id`、超时和取消信号；
-- 固化本次配置版本、Prompt 版本、模型和 MCP 工具版本；
+- 固化本次配置版本、Prompt 版本、模型和来源工具版本；
 - 记录 AI 节点输入、结构化输出、工具计划和 Review 反馈，敏感内容按策略脱敏；
 - 发出领域事件，如 `ItemCollected`、`DigestReady`、`DeliverySucceeded`。
 
@@ -226,7 +227,7 @@ sequenceDiagram
 - 同一期简报只允许一个活跃 Run；
 - 不同来源可并发，来源内部受 `maxConcurrency` 和速率限制；
 - 使用 PostgreSQL advisory lock 配合数据库唯一约束，避免调度器重复触发；
-- 每次 MCP 调用设置超时，失败只影响对应来源，不直接终止整个 Run。
+- 每次来源调用设置超时，失败只影响对应来源，不直接终止整个 Run。
 
 ### 5.2 Agent Runtime、AI 节点与职责
 
@@ -269,7 +270,7 @@ interface AgentContext {
 | 逻辑职责       | 目的                                       | MVP 承载位置                 |
 | -------------- | ------------------------------------------ | ---------------------------- |
 | Planner        | 结合主题、历史覆盖和来源能力决定研究方向   | `Research`                   |
-| Researcher     | 执行证据研究、识别缺口并提出 MCP 工具计划  | `Research`                   |
+| Researcher     | 执行证据研究、识别缺口并提出来源工具计划   | `Research`                   |
 | Curator        | 聚类事件、判断实质更新、价值和入选优先级   | `Curate & Write`             |
 | Editor         | 选择栏目、控制信息密度并生成结构化简报     | `Curate & Write`             |
 | Critic         | 检查遗漏、重复、事实、引用、表达质量和风险 | `Review`                     |
@@ -277,7 +278,7 @@ interface AgentContext {
 
 三个节点的边界：
 
-- `Research`：在授权目录和预算内完成“研究规划 + 工具计划 + 证据充分性判断”，但不直接执行 MCP；
+- `Research`：在授权目录和预算内完成“研究规划 + 工具计划 + 证据充分性判断”，但不直接访问来源；
 - `Curate & Write`：完成“事件聚类与价值判断 + 结构化写作”，输出可追溯到证据的 `DailyDigest`；
 - `Review`：只返回结构化问题、风险等级和下一步路由，不直接改写内容，也不执行外部副作用。
 
@@ -294,9 +295,10 @@ interface AgentContext {
 
 AI 节点的 Prompt、工具描述和输出 Schema 作为公开资源放在仓库中。任何效果改动都应同时更新回放样本或评测，避免“只改 Prompt、无法解释回归”。
 
-### 5.3 MCP Connector Registry
+### 5.3 Source Connector Registry
 
-所有平台接入统一转换为 `SourceConnector`，隐藏不同 MCP Server 的工具名和参数差异。
+所有平台接入统一转换为 `SourceConnector`。RSS 是默认直接实现；API 或可选 MCP 适配器也必须
+收敛到相同契约，不能把第三方传输细节泄漏给 Agent。
 
 ```ts
 interface SourceConnector {
@@ -319,22 +321,25 @@ interface CollectRequest {
 每个连接器通过版本化配置声明：
 
 ```yaml
-id: example-finance-source
-transport: streamable-http
-serverRef: finance-mcp
-allowedTools:
-  - search_news
-toolMapping:
-  search: search_news
-timeoutMs: 20000
+id: configured-rss
+transport: rss
+feedUrls:
+  - https://36kr.com/feed
+  - https://rss.huxiu.com/
+  - https://www.infoq.cn/feed
+tool: search_news
+timeoutMs: 5000
 maxConcurrency: 2
 trustTier: secondary
 topics: [finance]
 ```
 
-启动时执行能力探测，确认工具存在、输入 Schema 兼容、所需权限可用。验证失败的连接器进入 `unavailable`，Agent 不能改用未授权工具。
+启动时验证 Feed URL、工具输入 Schema 和所需权限。验证失败的连接器进入 `unavailable`，Agent
+不能临时访问模型参数提供的任意 URL。
 
-`Research` 节点可以从 `AllowedToolCatalog` 中选择工具和生成结构化参数，但计划必须满足 JSON Schema、权限和预算约束，例如时间范围、最大查询数、语言和禁止项。确定性 MCP Gateway 完成最终参数校验与执行，模型永远不能绕过 Gateway 直接访问外部服务。
+`Research` 节点可以从 `AllowedToolCatalog` 中选择工具和生成结构化参数，但计划必须满足 JSON
+Schema、权限和预算约束。确定性 Tool Gateway 完成最终参数校验与执行；Feed URL 只来自应用配置，
+模型永远不能绕过 Gateway 直接访问任意外部地址。
 
 ### 5.4 Normalizer
 
@@ -554,7 +559,7 @@ interface MemoryService {
 ### 7.2 内容
 
 - `raw_items`
-  - MCP 原始响应、来源、工具名、调用参数摘要、采集时间
+  - RSS/API 原始响应、来源、工具名、调用参数摘要、采集时间
 - `normalized_items`
   - 统一字段、canonical URL、指纹、embedding、信任级别
 - `stories`
@@ -597,7 +602,7 @@ interface MemoryService {
 
 ### 8.2 重试策略
 
-- MCP 超时、限流和 5xx：指数退避并带抖动，尊重服务端重试提示；
+- RSS/API 超时、限流和 5xx：指数退避并带抖动，尊重服务端重试提示；
 - 参数错误、权限错误、Schema 不兼容：不自动盲目重试，直接标记需要运维处理；
 - LLM 超时或限流：有限次重试；
 - LLM Schema 校验失败：携带校验错误修复一次，仍失败则降级；
@@ -616,19 +621,19 @@ interface MemoryService {
 
 ## 9. 安全与合规
 
-### 9.1 MCP 权限
+### 9.1 来源与工具权限
 
 - 连接器和工具双重白名单；
 - 收集连接器默认只读；
 - 发送连接器只允许写入指定飞书群或文档空间；
-- MCP Server 使用独立最小权限凭证；
+- API Source 使用独立最小权限凭证；RSS Source 默认不需要凭证；
 - 密钥存入部署平台 Secret Manager，不写入数据库、日志或 Prompt；
 - 保存工具调用审计，但对参数中的密钥和个人信息做脱敏。
 
 ### 9.2 Prompt Injection 防护
 
-- MCP 返回内容一律标为不可信数据；
-- AI 节点只能看到当前职责所需的逻辑工具目录，不能直接获得 MCP 传输、凭证或网络访问能力；
+- RSS/API 返回内容一律标为不可信数据；
+- AI 节点只能看到当前职责所需的逻辑工具目录，不能直接获得 Feed URL、凭证或网络访问能力；
 - 不执行资讯正文中的指令、链接或代码；
 - `Research` 产生结构化工具计划，确定性 Gateway 再执行权限、Schema、预算和参数校验；
 - 对正文长度、URL、附件类型和响应体大小设置限制；
@@ -687,7 +692,7 @@ Cloud Scheduler / cron
         v
 Agent Worker Container ----> Model Gateway ----> 云模型或本地模型
         |
-        +----> MCP Servers ----> 外部平台
+        +----> Source Connectors ----> RSS / 新闻 API
         |
         +----> Output Plugins ----> 飞书 / 文件 / 其他渠道
         |
@@ -696,11 +701,12 @@ Agent Worker Container ----> Model Gateway ----> 云模型或本地模型
 
 建议由外部调度器每天触发一次短生命周期 Job。相比在常驻 Node.js 进程内使用 cron，它不受进程重启、容器漂移和多副本重复调度影响。调度器仍可能重复投递，因此数据库幂等约束不可省略。
 
-数据库每日备份；Worker 可无状态扩缩容。MCP Server 如需本地 `stdio`，由 Worker 在受控子进程中拉起；远程平台优先使用受认证的 Streamable HTTP。
+数据库每日备份；Worker 可无状态扩缩容。新闻来源默认由 Worker 直接读取，不额外部署 MCP Server；
+若未来接入 MCP，仅作为满足相同 Source/Tool 契约的可选适配器。
 
 ### 11.2 环境
 
-- `local`：Docker Compose，使用 Fixture MCP、文件输出和可选本地模型；
+- `local`：Docker Compose，使用 RSS/Fixture Source、文件输出和可选本地模型；
 - `staging`：真实只读来源、发送到内部测试群；
 - `production`：生产来源和目标群，启用发布阈值与告警。
 
@@ -713,9 +719,9 @@ Agent Worker Container ----> Model Gateway ----> 云模型或本地模型
 默认采用完整开源核心，而不是依赖闭源控制平面的 open-core：
 
 - `core`：领域中立的信息研究模型、Agent Runtime、工作流、记忆和评测；
-- `plugin-sdk`：Model、Embedding、Source/MCP、Storage、Output 扩展接口；
+- `plugin-sdk`：Model、Embedding、Source/Tool、Storage、Output 扩展接口；
 - `presets/finance-ai`：本项目默认主题、Agent 指令、栏目配置、来源建议和评测数据；
-- 官方插件：PostgreSQL、通用 MCP、文件输出、飞书输出和模型 Provider 示例；
+- 官方插件：RSS Source、PostgreSQL、可选通用 MCP、文件输出、飞书输出和模型 Provider 示例；
 - CLI 与本地部署文件；
 - 文档、示例、Fixture、数据库迁移和兼容性测试。
 
@@ -757,7 +763,8 @@ pnpm dev --fixture examples/fixtures/daily-run.json --output file
 pnpm eval
 ```
 
-本地闭环不要求飞书 Token、付费新闻账号或指定商业模型。Fixture Provider 可以返回稳定的模型与 MCP 响应；有条件时再切换到本地或云模型做真实效果验证。
+本地闭环不要求飞书 Token、付费新闻账号或指定商业模型。Fixture Provider 可以返回稳定的模型与
+RSS 响应；有条件时再切换到真实 RSS/API 或云模型做效果验证。
 
 ### 12.4 仓库治理与发布
 
@@ -792,6 +799,7 @@ plugins/
   model-ai-sdk/
   embedding-openai-compatible/
   storage-postgres/
+  source-rss/
   source-mcp/
   output-file/
   output-feishu/
@@ -815,7 +823,8 @@ tests/
 docs/
 ```
 
-领域层不直接依赖 MCP SDK、模型 SDK 或数据库驱动，外部能力均通过 Plugin SDK 接入。仓库使用 pnpm workspace，但首期保持单进程运行，避免把模块化误做成分布式系统。
+领域层不直接依赖 RSS Parser、MCP SDK、模型 SDK 或数据库驱动，外部能力均通过 Plugin SDK 接入。
+仓库使用 pnpm workspace，但首期保持单进程运行，避免把模块化误做成分布式系统。
 
 ## 14. 测试策略
 
@@ -829,7 +838,7 @@ docs/
 
 ### 14.2 契约测试
 
-- 使用录制的 MCP 工具 Schema 与响应 Fixture 验证每个连接器；
+- 使用录制的 RSS/API 响应 Fixture 验证每个连接器；
 - 启动时的能力探测失败场景；
 - 飞书输出结构和长度限制；
 - LLM 结构化输出的 Schema 与降级逻辑。
@@ -871,18 +880,18 @@ docs/
 - 初始化 pnpm workspace、TypeScript、测试、Lint、配置和数据库迁移；
 - 定义 Plugin SDK、Agent Node/Role、Model Provider 和 Eval 接口；
 - 实现 Run/Stage 状态机、CLI、结构化日志；
-- 提供 Fixture Model/MCP、文件输出、本地 Docker Compose 和 CI；
+- 提供 Fixture Model/Source、文件输出、本地 Docker Compose 和 CI；
 - 建立首批 `Research`、`Curate & Write`、`Review` 回放样本，并在样本标签中保留六种逻辑职责。
 
 验收：新贡献者无需商业账号即可运行完整 Fixture 流程；空来源也可创建、恢复、结束一个 Run，重复触发不重复执行。
 
 ### Phase 1：可发送的最小闭环
 
-- 接入 2～3 个 MCP 来源；
+- 接入 2～3 个 RSS/API 来源；
 - 实现 `Research` 的研究计划、工具计划与预算循环；
 - 完成标准化、精确去重以及 `Curate & Write` 的事件判断和简报生成；
 - 接入 `Review` 的结构化校验、补证路由与定向修订；
-- 生成 Markdown 并通过飞书 MCP 发送；
+- 生成 Markdown 并通过飞书 Output Plugin 发送；
 - 保存原始条目、Digest 和 Delivery。
 
 验收：连续运行 7 天，无重复发送，每条摘要有有效来源。
@@ -919,9 +928,11 @@ MVP 数据规模有限，关系数据、JSONB 与向量检索放在同一数据�
 
 先生成并持久化，再发送。发送失败不会导致内容变化，人工也可以审核或重发同一版本。
 
-### ADR-004：Agent 规划工具，Gateway 执行 MCP
+### ADR-004：Agent 规划工具，Gateway 执行受控来源访问
 
-Agent 可以从授权目录选择工具并生成参数，以保留 AI-first 的研究能力；Gateway 负责工具白名单、参数校验、超时和真实执行。这既隔离平台差异，也避免不可信内容诱导模型绕过权限。
+Agent 可以从授权目录选择工具并生成参数，以保留 AI-first 的研究能力；Gateway 负责工具白名单、
+参数校验、超时和真实执行。RSS Feed URL 由应用配置而不是模型指定。这既隔离来源差异，也避免
+不可信内容诱导模型访问任意地址。
 
 ### ADR-005：长期记忆必须有来源和有效期
 
@@ -953,12 +964,12 @@ AI-first 产品不能只依靠单元测试，也不能靠主观比较 Prompt。�
 
 - 定时任务连续 7 天可稳定运行；
 - 重复触发、进程重启、单来源失败不会导致重复发送；
-- 至少两个金融来源和两个 AI 来源可通过 MCP 接入；
+- 至少两个金融来源和两个 AI 来源可通过 RSS/API Source 接入；
 - 每条简报内容都有可点击或可追溯来源；
 - 支持跨源去重和最近历史去重；
 - 能查看单次 Run 的阶段、输入版本、错误、成本和发送回执；
 - 支持 dry-run、从失败阶段恢复、重发已有制品；
-- 飞书目标、MCP 工具和凭证符合最小权限；
+- 飞书目标、来源工具和凭证符合最小权限；
 - `Research`、`Curate & Write`、`Review` 有独立的结构化输入输出、预算和回放指标；
 - 历史样本回放测试纳入 CI，Prompt 或模型变化可以看到质量与成本差异；
 - 不依赖商业账号即可通过 Fixture、文件输出和 Docker Compose 本地运行；
@@ -968,6 +979,7 @@ AI-first 产品不能只依靠单元测试，也不能靠主观比较 Prompt。�
 
 ## 18. 技术参考
 
+- [rss-parser](https://github.com/rbren/rss-parser)
 - [MCP TypeScript SDK Client Guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/client.md)
 - [MCP TypeScript SDK Server Guide](https://github.com/modelcontextprotocol/typescript-sdk/blob/main/docs/server.md)
 - [pgvector](https://github.com/pgvector/pgvector)

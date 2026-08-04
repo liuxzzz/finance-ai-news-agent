@@ -89,10 +89,36 @@ export interface ToolResult {
   isError: boolean;
 }
 
-export interface McpGateway {
-  listTools(): Promise<ToolDescriptor[]>;
-  callTool(call: ToolCall): Promise<ToolResult>;
+export interface ToolExecutionContext {
+  runId?: string;
 }
+
+/** Framework-neutral boundary for tools the model may choose but never executes itself. */
+export interface ToolGateway {
+  listTools(): Promise<ToolDescriptor[]>;
+  callTool(call: ToolCall, context?: ToolExecutionContext): Promise<ToolResult>;
+}
+
+/** @deprecated Use ToolGateway. Kept for optional MCP adapter compatibility. */
+export type McpGateway = ToolGateway;
+
+export {
+  SourceRunStatusSchema,
+  type RawSourceItemInput,
+  type RawSourceItemRecord,
+  type RecordSourceCollectionInput,
+  type SourceAuditStore,
+  type SourceRunRecord,
+  type SourceRunStatus,
+} from "./source-store.js";
+
+export {
+  type ContentStore,
+  type FindPreviouslySeenContentInput,
+  type NormalizedContentItemInput,
+  type NormalizedContentItemRecord,
+  type PreviouslySeenContentRecord,
+} from "./content-store.js";
 
 export interface ToolCallingModelRequest extends ModelRequest {
   tools: ToolDescriptor[];

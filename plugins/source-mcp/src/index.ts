@@ -1,7 +1,7 @@
 import type {
-  McpGateway,
   ToolCall,
   ToolDescriptor,
+  ToolGateway,
   ToolResult,
 } from "@finance-ai-news-agent/plugin-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -40,7 +40,7 @@ interface CachedTool {
  * It never exposes tools outside the allowlist and validates arguments locally
  * before a remote MCP server can observe them.
  */
-export class McpClientGateway implements McpGateway {
+export class McpClientGateway implements ToolGateway {
   private readonly allowedTools: ReadonlySet<string>;
   private readonly timeoutMs: number;
   private readonly maxResultBytes: number;
@@ -158,7 +158,7 @@ export interface ConnectStreamableHttpMcpGatewayOptions extends McpClientGateway
 }
 
 export interface ConnectedMcpGateway {
-  gateway: McpGateway;
+  gateway: ToolGateway;
   close(): Promise<void>;
 }
 

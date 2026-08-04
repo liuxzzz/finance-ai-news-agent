@@ -82,7 +82,10 @@ export async function runPersistentFixture(args: string[]): Promise<void> {
   }
 }
 
-export async function showRunStatus(runId: string | undefined): Promise<void> {
+export async function showRunStatus(
+  runId: string | undefined,
+  options: { json?: boolean } = {},
+): Promise<void> {
   if (runId === undefined || runId.trim().length === 0) {
     throw new Error("Usage: finance-ai-news-agent status <run-id>");
   }
@@ -97,12 +100,54 @@ export async function showRunStatus(runId: string | undefined): Promise<void> {
       throw new Error(`Run ${runId} was not found.`);
     }
 
-    const [stages, deliveries, modelCalls] = await Promise.all([
-      store.listStages(run.id),
-      store.listDeliveries(run.id),
-      store.listModelCalls(run.id),
-    ]);
-    process.stdout.write(`${JSON.stringify({ run, stages, modelCalls, deliveries }, null, 2)}\n`);
+    const [stages, deliveries, modelCalls, sourceRuns, rawSourceItems, normalizedContentItems] =
+      await Promise.all([
+        store.listStages(run.id),
+        store.listDeliveries(run.id),
+        store.listModelCalls(run.id),
+        store.listSourceRuns(run.id),
+        store.listRawSourceItems(run.id),
+        store.listNormalizedContentItems(run.id),
+      ]);
+    const detail = {
+      run,
+      stages,
+      sourceRuns,
+      rawSourceItems,
+      normalizedContentItems,
+      modelCalls,
+      deliveries,
+    };
+
+    if (options.json) {
+      process.stdout.write(`${JSON.stringify(detail, null, 2)}\n`);
+      return;
+    }
+
+    const sourceCounts = new Map<string, number>();
+
+    for (const item of normalizedContentItems) {
+      const source = item.source ?? item.sourceId ?? "unknown";
+      sourceCounts.set(source, (sourceCounts.get(source) ?? 0) + 1);
+    }
+
+    process.stdout.write(
+      [
+        `Run: ${run.id}`,
+        `Status: ${run.status}`,
+        `Identity: ${run.tenantId}/${run.reportDate}/${run.edition}`,
+        `Attempts: ${run.attemptCount}`,
+        `Stages: ${stages.map((stage) => `${stage.stage}#${stage.attempt}:${stage.status}`).join(", ") || "none"}`,
+        `Sources: ${sourceRuns.map((source) => `${source.sourceId}:${source.status}`).join(", ") || "none"}`,
+        `Raw items: ${rawSourceItems.length}`,
+        `Normalized evidence: ${normalizedContentItems.length}`,
+        `Evidence by source: ${[...sourceCounts.entries()].map(([source, count]) => `${source}=${count}`).join(", ") || "none"}`,
+        `Model calls: ${modelCalls.length}`,
+        `Model tokens: ${modelCalls.reduce((total, call) => total + call.totalTokens, 0)}`,
+        `Deliveries: ${deliveries.map((delivery) => `${delivery.pluginId}:${delivery.status}#${delivery.attempt}`).join(", ") || "none"}`,
+        "",
+      ].join("\n"),
+    );
   } finally {
     await pool.end();
   }

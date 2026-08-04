@@ -14,13 +14,13 @@
 - 确定性 `RunExecutor`、Run/Stage 状态机、发布门禁和审计接口；
 - PostgreSQL Runtime Store、版本化迁移、运行锁和 LangGraph durable checkpoint；
 - DeepSeek AI SDK 结构化模型适配、版本化编辑/审核 Prompt 和确定性引用渲染；
-- 本地文件输出和 MCP Client 适配器骨架；
+- 本地文件输出、RSS 实时来源和可选 MCP Client 适配器；
 - 完全离线、无需模型密钥和外部服务的 Fixture Demo；
 - PostgreSQL + pgvector 的本地基础设施配置。
 
-目前已经能使用真实 DeepSeek 模型处理合成回放证据，但尚未接入实时新闻来源、MCP Gateway
-和长期记忆。当前代码已经验证**模块边界、结构化模型链路、持久化执行闭环和故障恢复**，
-但还不是可直接用于生产的实时新闻研究系统。
+目前已经能使用真实 DeepSeek 模型处理合成回放证据，也能通过内部 `search_news` 工具直接读取
+36氪、虎嗅和 InfoQ RSS。当前代码已经验证**实时采集、模块边界、结构化模型链路、持久化执行闭环和故障恢复**，
+但多来源、长期记忆和生产监控仍待完成。
 
 ## 2. 总体架构
 
@@ -44,11 +44,13 @@ flowchart LR
     CLI --> Model[plugins/model-ai-sdk]
     Model --> SDK
     Model --> AISDK[AI SDK]
-    Source[plugins/source-mcp] --> MCP[MCP TypeScript SDK]
+    Source[plugins/source-rss] --> RSS[rss-parser]
+    RSS --> Feed[36氪 / 虎嗅 / InfoQ / 配置的 RSS Feed]
+    Optional[plugins/source-mcp] --> MCP[MCP TypeScript SDK 可选]
     Storage --> PG[(PostgreSQL)]
     Storage --> Checkpoint[LangGraph PostgresSaver]
 
-    Source -. 尚未接入 Demo .-> CLI
+    Source --> CLI
     Model --> DeepSeek[DeepSeek API]
 ```
 
@@ -57,7 +59,7 @@ flowchart LR
 | 层级                  | 当前职责                                         | 不负责的内容                                 |
 | --------------------- | ------------------------------------------------ | -------------------------------------------- |
 | `apps/cli`            | 命令解析、依赖组装、迁移、Fixture Run 和审计查询 | Agent 图的结构、通用插件协议                 |
-| `packages/core`       | Agent 图、确定性 Runtime、恢复、发布门禁         | 具体模型厂商、MCP 传输、数据库驱动、输出渠道 |
+| `packages/core`       | Agent 图、确定性 Runtime、恢复、发布门禁         | 具体模型厂商、来源传输、数据库驱动、输出渠道 |
 | `packages/plugin-sdk` | 定义稳定、框架无关的外部能力接口和数据契约       | 任何第三方 SDK 的具体实现                    |
 | `plugins/*`           | 将第三方 SDK 或本地能力适配到项目边界            | 决定业务流程和 Agent 节点顺序                |
 | `presets` / `prompts` | 预留业务主题、角色指令、栏目和评测配置           | 通用运行时能力                               |
@@ -75,14 +77,14 @@ apps  ──────>  core  ──────>  plugin-sdk
 关键约束：
 
 - LangGraph 编排代码和类型只留在 `packages/core` 内，不进入 Plugin SDK；根包仅为 Studio 本地开发声明必要的运行时依赖；
-- AI SDK、MCP SDK 和 PostgreSQL Driver 只出现在对应插件中；
+- AI SDK、RSS Parser、MCP SDK 和 PostgreSQL Driver 只出现在对应插件中；
 - CLI 是当前的 Composition Root，负责选择并组装 Core 与插件；
 - 插件不能决定 Agent 工作流，也不应依赖 Core 的内部实现；
 - Core 和公共契约不绑定“金融 + AI”主题，领域配置最终应放入 Preset 和 Prompt。
 
-当前 `storage-postgres` 已实现 Plugin SDK 的 `RuntimeStore` 和 Model Call Ledger；`source-mcp`
-已实现 Streamable HTTP 连接、工具白名单、JSON Schema 参数校验、超时和结果大小限制。
-长期记忆的 `MemoryPort` 仍无实现。
+当前 `storage-postgres` 已实现 Plugin SDK 的 `RuntimeStore` 和 Model Call Ledger；`source-rss`
+已实现 RSS 拉取、缓存、跨源容错、去重、相关度/时间排序和 Evidence 标准化。`source-mcp` 作为
+可选外部工具适配器保留，不进入默认实时链路。长期记忆的 `MemoryPort` 仍无实现。
 
 ## 3. Agent Graph
 
@@ -103,7 +105,7 @@ flowchart LR
 
 | 节点           | 输入关注点         | 输出到共享状态                        | 当前实现                             |
 | -------------- | ------------------ | ------------------------------------- | ------------------------------------ |
-| Research       | 研究主题、审核反馈 | `plan`、`evidence`、`modelUsage`      | Fixture、回放或 MCP Function Calling |
+| Research       | 研究主题、审核反馈 | `plan`、`evidence`、`modelUsage`      | Fixture、回放或 RSS Function Calling |
 | Curate & Write | 证据、Review 反馈  | `stories`、`draft`、`revisionCount`   | Fixture，或 DeepSeek 结构化 Story    |
 | Review         | 草稿与证据         | `approved`、`critique`、`reviewRoute` | Fixture，或 DeepSeek 结构化审核决定  |
 
@@ -130,7 +132,7 @@ Review 的条件分支规则是：
 | `topic`         | 本次研究主题                                       | CLI            |
 | `maxRevisions`  | Review 拒绝后允许的最大修订次数                    | CLI            |
 | `plan`          | 研究步骤                                           | Research       |
-| `evidence`      | 带标题、URL 和摘录的证据                           | Research       |
+| `evidence`      | 带标题、URL、摘录、来源和发布时间的证据            | Research       |
 | `stories`       | 聚合后的事件及其证据引用                           | Curate & Write |
 | `draft`         | Markdown 简报草稿                                  | Curate & Write |
 | `critique`      | 质量检查结论                                       | Review         |
@@ -189,9 +191,9 @@ Provider HTTP 自动重试被关闭，Schema 恢复调用显式计入 `modelUsag
 `model_calls`。每次请求在发送前预留预算；即使进程在 checkpoint 前中断，预留记录也会继续占用
 Run 的硬请求上限。
 
-`pnpm run:live` 在此基础上组装 `ToolCallingModelProvider`、受控 `McpGateway` 和 Tool Calling
-Research Provider。模型产生工具意图，Gateway 执行白名单工具；Evidence 直接从 MCP 结构化结果
-解析并校验，模型不能生成或替换来源 URL。
+`pnpm run:live` 在此基础上组装 `ToolCallingModelProvider`、内部 `RssNewsGateway` 和 Tool Calling
+Research Provider。模型只产生 `search_news` 的关键词与数量；Gateway 从应用配置的 Feed 拉取新闻，
+并将 RSS 条目标准化为 Evidence。模型不能指定 Feed URL，也不能生成或替换来源 URL。
 
 ## 6. Plugin SDK
 
@@ -203,7 +205,7 @@ Research Provider。模型产生工具意图，Gateway 执行白名单工具；E
 | `ModelProvider`            | 接收角色、系统提示和用户提示，返回文本、模型名和 token 用量 | `model-ai-sdk` 已适配 `generateText`              |
 | `StructuredModelProvider`  | 使用 Zod Schema 约束 JSON 业务输出                          | DeepSeek + AI SDK `Output.object` 已接入 `run-ai` |
 | `ToolCallingModelProvider` | 返回函数调用意图但不在 Provider 内执行工具                  | DeepSeek + AI SDK 已实现并通过协议测试            |
-| `McpGateway`               | 列出允许的工具并执行结构化工具调用                          | `source-mcp` 已实现受控 Streamable HTTP Gateway   |
+| `ToolGateway`              | 列出允许的内部/外部工具并执行结构化调用                     | `source-rss` 已接入默认实时链路                   |
 | `MemoryPort`               | 搜索记忆和提交记忆候选                                      | 已定义接口；暂无实现                              |
 | `OutputPlugin`             | 按稳定 `deliveryKey` 幂等发送并返回回执                     | `output-file` 已实现并通过幂等契约测试            |
 | `RuntimeStore`             | 持久化 Run、Stage、Artifact、Delivery 和运行锁              | PostgreSQL 与内存实现均已接入                     |
@@ -223,7 +225,8 @@ Research Provider。模型产生工具意图，Gateway 执行白名单工具；E
 ├── plugins/
 │   ├── model-ai-sdk/             # AI SDK -> ModelProvider 适配器
 │   ├── output-file/              # Markdown/文本制品写入本地文件
-│   ├── source-mcp/               # MCP Client、传输与受控 Gateway
+│   ├── source-rss/               # RSS 拉取、排序、缓存与 Evidence 标准化
+│   ├── source-mcp/               # 可选 MCP Client 与受控 Gateway
 │   └── storage-postgres/         # Runtime Store、迁移和 durable checkpoint
 ├── db/
 │   ├── init/                     # 数据库容器首次启动时执行的初始化 SQL
@@ -246,7 +249,7 @@ Research Provider。模型产生工具意图，Gateway 执行白名单工具；E
 - `src/demo.ts`：组装内存 Runtime、运行 Agent Graph 并输出 Markdown；
 - `src/runtime-command.ts`：组装 PostgreSQL Runtime、迁移、持久化执行和审计查询；
 - `src/ai-runtime-command.ts`：安全读取 DeepSeek 配置并组装结构化模型回放 Run；
-- `src/live-runtime-command.ts`：组装 DeepSeek Function Calling、MCP Gateway 和实时研究 Run；
+- `src/live-runtime-command.ts`：组装 DeepSeek Function Calling、RSS Gateway 和实时研究 Run；
 - `src/replay-research.ts`：提供明确标注为合成数据的固定 Evidence；
 - `src/fixture-handlers.ts`：定义 Research、Curate & Write、Review 三个离线 Fixture Handler；
 - `src/studio-graph.ts`：导出供 LangGraph Studio 加载的无本地 checkpointer Graph；
@@ -273,8 +276,8 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 
 ### 7.3 `packages/plugin-sdk`
 
-- `src/index.ts`：集中定义插件 Manifest、模型、MCP、记忆和输出接口；
-- 只依赖 Zod，不依赖 LangGraph、AI SDK、MCP SDK 或数据库驱动；
+- `src/index.ts`：集中定义插件 Manifest、模型、工具、记忆和输出接口；
+- 只依赖 Zod，不依赖 LangGraph、AI SDK、RSS Parser、MCP SDK 或数据库驱动；
 - 是第三方插件未来应该依赖的公共 package。
 
 ### 7.4 `plugins`
@@ -282,8 +285,10 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 - `model-ai-sdk`：把 AI SDK 的 `LanguageModel` 包装成项目 `ModelProvider`，并使用官方
   DeepSeek Provider 实现 `StructuredModelProvider`；
 - `output-file`：确保目标目录存在后写入 UTF-8 文件，是当前唯一接入执行闭环的插件；
+- `source-rss`：直接读取受信配置中的 RSS Feed，提供内部只读 `search_news` 工具，并完成缓存、
+  跨源容错、去重、相关度/时间排序及 Evidence 标准化；
 - `source-mcp`：创建官方 MCP SDK `Client`，提供 Streamable HTTP 连接、显式工具白名单、JSON
-  Schema 参数校验、超时与响应体限制；
+  Schema 参数校验、超时与响应体限制；当前仅为可选适配器；
 - `storage-postgres`：提供 `PostgresRuntimeStore`、Model Call Ledger、session advisory lock、带
   checksum 的迁移 runner 和 LangGraph `PostgresSaver`；长期记忆的 `MemoryPort` 尚未实现。
 
@@ -325,18 +330,19 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 
 ## 8. 当前完成度与目标架构的差距
 
-| 能力                 | 当前状态                         | 下一步接线位置                            |
-| -------------------- | -------------------------------- | ----------------------------------------- |
-| 三节点编排与有限修订 | 已实现                           | 接入真实 `ModelProvider` Handler          |
-| 离线研究闭环         | 已实现                           | `apps/cli/src/demo.ts`                    |
-| 本地文件输出         | 已实现                           | `plugins/output-file`                     |
-| 真实模型调用         | DeepSeek 已组装并完成冒烟验收    | 增加评测基线与更多模型 Provider           |
-| MCP 新闻采集         | Gateway 与 `run-live` 已完成     | 配置并验收实际金融/AI MCP 新闻源          |
-| PostgreSQL Runtime   | 已实现 Run/Stage、迁移、锁和恢复 | 后续扩展内容与长期记忆表                  |
-| 长期记忆             | 只有公共接口                     | `MemoryPort` 与确定性 Memory Service 实现 |
-| 业务 Prompt/Preset   | 目录占位                         | `prompts/`、`presets/finance-ai/`         |
-| 运行幂等、审计、恢复 | 已实现并接入 CLI                 | 补真实 PostgreSQL 并发集成测试与可观测性  |
-| 飞书输出、评测与观测 | 未实现                           | 新插件和独立 eval/observability 模块      |
+| 能力                 | 当前状态                                | 下一步接线位置                     |
+| -------------------- | --------------------------------------- | ---------------------------------- |
+| 三节点编排与有限修订 | 已实现                                  | 接入真实 `ModelProvider` Handler   |
+| 离线研究闭环         | 已实现                                  | `apps/cli/src/demo.ts`             |
+| 本地文件输出         | 已实现                                  | `plugins/output-file`              |
+| 真实模型调用         | DeepSeek 已组装并完成冒烟验收           | 增加评测基线与更多模型 Provider    |
+| RSS 新闻采集         | 三个 Feed、来源审计与失败隔离已实现     | 增加更多专业金融/AI Feed           |
+| PostgreSQL Runtime   | Run/Stage、来源、内容、锁和恢复已实现   | 后续扩展语义记忆表                 |
+| 长期记忆             | 已实现 7 天精确历史去重                 | 增加事件进展、向量检索、偏好与反馈 |
+| 业务 Prompt/Preset   | 目录占位                                | `prompts/`、`presets/finance-ai/`  |
+| 运行幂等、审计、恢复 | 已实现并通过真实 PostgreSQL 验收        | 继续扩展告警与基线对比             |
+| 飞书输出             | 已实现并完成真实发送与重复触发验收      | 增加交互卡片等可选渲染器           |
+| 调度、部署与观测     | launchd、Docker、health、metrics 已实现 | 增加云告警和托管部署示例           |
 
 在继续开发时，应优先保持现有边界：Core 只表达流程与领域状态，第三方能力通过 Plugin SDK
 接入，CLI/Runtime 负责组装，Preset 和 Prompt 负责领域差异。

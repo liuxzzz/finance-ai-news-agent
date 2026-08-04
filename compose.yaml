@@ -16,5 +16,25 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
 
+  agent:
+    profiles: ["worker"]
+    build:
+      context: .
+    env_file:
+      - path: .env.local
+        required: true
+      - path: .env.feishu.local
+        required: false
+    environment:
+      DATABASE_URL: postgresql://agent:agent@postgres:5432/finance_ai_news
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - /bin/sh
+      - -c
+      - node apps/cli/dist/index.js migrate && node apps/cli/dist/index.js run-live --edition daily
+    restart: "no"
+
 volumes:
   postgres-data:

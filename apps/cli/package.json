@@ -21,9 +21,10 @@
   "dependencies": {
     "@finance-ai-news-agent/core": "workspace:*",
     "@finance-ai-news-agent/model-ai-sdk": "workspace:*",
+    "@finance-ai-news-agent/output-feishu": "workspace:*",
     "@finance-ai-news-agent/output-file": "workspace:*",
     "@finance-ai-news-agent/plugin-sdk": "workspace:*",
-    "@finance-ai-news-agent/source-mcp": "workspace:*",
+    "@finance-ai-news-agent/source-rss": "workspace:*",
     "@finance-ai-news-agent/storage-postgres": "workspace:*"
   },
   "devDependencies": {
