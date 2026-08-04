@@ -1,17 +1,22 @@
-import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
-import { createAgentGraph, type AgentGraphStateValue } from "@finance-ai-news-agent/core";
+import {
+  createAgentGraph,
+  InMemoryRuntimeStore,
+  LangGraphAgentWorkflow,
+  RunExecutor,
+  type AgentGraphStateValue,
+} from "@finance-ai-news-agent/core";
 import { FileOutputPlugin } from "@finance-ai-news-agent/output-file";
-import type { RenderedArtifact } from "@finance-ai-news-agent/plugin-sdk";
+import type { RunRecord } from "@finance-ai-news-agent/plugin-sdk";
 
 import { fixtureHandlers } from "./fixture-handlers.js";
 
-function renderDemoDigest(state: AgentGraphStateValue): string {
+export function renderDemoDigest(state: AgentGraphStateValue, run: RunRecord): string {
   return [
     "# Finance & AI News Agent — Fixture Demo",
     "",
-    `- Run ID: \`${state.runId}\``,
+    `- Run ID: \`${run.id}\``,
     `- Topic: ${state.topic}`,
     `- Approved: ${state.approved ? "yes" : "no"}`,
     `- Revisions: ${state.revisionCount}`,
@@ -28,39 +33,37 @@ function renderDemoDigest(state: AgentGraphStateValue): string {
 }
 
 export async function runDemo(): Promise<void> {
-  const runId = randomUUID();
-  const graph = createAgentGraph(fixtureHandlers);
-  const state = await graph.invoke(
-    {
-      runId,
-      topic: "Finance & AI",
-      maxRevisions: 1,
-    },
-    {
-      configurable: {
-        thread_id: runId,
-      },
-    },
-  );
-
   const defaultOutputPath = resolve(
     process.env.INIT_CWD ?? process.cwd(),
     ".artifacts/demo-digest.md",
   );
   const outputPath = process.env.AGENT_OUTPUT_PATH ?? defaultOutputPath;
   const output = new FileOutputPlugin(outputPath);
-  const artifact: RenderedArtifact = {
-    id: runId,
-    mediaType: "text/markdown",
-    content: renderDemoDigest(state),
-  };
-  const receipt = await output.deliver(artifact);
+  const graph = createAgentGraph(fixtureHandlers);
+  const runtime = new RunExecutor({
+    store: new InMemoryRuntimeStore(),
+    workflow: new LangGraphAgentWorkflow(graph),
+    renderArtifact: (state, run) => ({
+      mediaType: "text/markdown",
+      content: renderDemoDigest(state, run),
+    }),
+    output,
+    deliveryTarget: outputPath,
+  });
+  const result = await runtime.execute({
+    tenantId: "fixture",
+    reportDate: new Date().toISOString().slice(0, 10),
+    edition: "demo",
+    topic: "Finance & AI",
+    maxRevisions: 1,
+  });
 
   process.stdout.write(
     [
       "Fixture demo completed.",
-      `Artifact: ${receipt.target}`,
-      `Trace: ${state.trace.join(" -> ")}`,
+      `Run: ${result.run.id} (${result.run.status})`,
+      `Artifact: ${result.delivery?.target ?? outputPath}`,
+      `Trace: ${result.state?.trace.join(" -> ") ?? "unavailable"}`,
       "",
     ].join("\n"),
   );

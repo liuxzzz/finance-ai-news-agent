@@ -9,6 +9,8 @@ import {
 } from "@finance-ai-news-agent/plugin-sdk";
 
 export class FileOutputPlugin implements OutputPlugin {
+  readonly deliverySemantics = "idempotent-by-key" as const;
+
   readonly manifest: PluginManifest = {
     id: "output-file",
     name: "Local File Output",

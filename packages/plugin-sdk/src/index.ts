@@ -81,7 +81,49 @@ export interface DeliveryReceipt {
   deliveredAt: string;
 }
 
+export interface DeliveryContext {
+  /** Stable key that output plugins should pass to providers supporting idempotency. */
+  deliveryKey: string;
+}
+
 export interface OutputPlugin {
   readonly manifest: PluginManifest;
-  deliver(artifact: RenderedArtifact): Promise<DeliveryReceipt>;
+  /**
+   * Repeating deliver with the same deliveryKey must produce one logical external delivery.
+   */
+  readonly deliverySemantics: "idempotent-by-key";
+  deliver(artifact: RenderedArtifact, context: DeliveryContext): Promise<DeliveryReceipt>;
 }
+
+export {
+  DeliveryStatusSchema,
+  RunStageStatusSchema,
+  RunStatusSchema,
+  type ArtifactRecord,
+  type CompleteDeliveryInput,
+  type CompleteRunStageInput,
+  type CreateRunInput,
+  type CreateRunResult,
+  type DeliveryRecord,
+  type DeliveryStatus,
+  type FailDeliveryInput,
+  type FailRunStageInput,
+  type FinishRunInput,
+  type JsonObject,
+  type JsonPrimitive,
+  type JsonValue,
+  type RunIdentity,
+  type RunLock,
+  type RunRecord,
+  type RunStageRecord,
+  type RunStageStatus,
+  type RunStatus,
+  type RuntimeStore,
+  type SaveArtifactInput,
+  type SerializedError,
+  type SkipRunStageInput,
+  type StartDeliveryInput,
+  type StartDeliveryResult,
+  type StartRunStageInput,
+  type TerminalRunStatus,
+} from "./runtime-store.js";

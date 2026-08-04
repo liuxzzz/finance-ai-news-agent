@@ -23,7 +23,7 @@ export const ReviewRouteSchema = z.enum(["research", "revise"]);
 
 export type ReviewRoute = z.infer<typeof ReviewRouteSchema>;
 
-export const AgentGraphState = new StateSchema({
+export const AgentGraphStateValueSchema = z.object({
   runId: z.string(),
   topic: z.string(),
   maxRevisions: z.number().int().nonnegative().default(1),
@@ -35,12 +35,24 @@ export const AgentGraphState = new StateSchema({
   approved: z.boolean().default(false),
   reviewRoute: ReviewRouteSchema.default("revise"),
   revisionCount: z.number().int().nonnegative().default(0),
-  trace: new ReducedValue(
-    z.array(z.string()).default(() => []),
-    {
-      reducer: (current, update) => current.concat(update),
-    },
-  ),
+  trace: z.array(z.string()).default(() => []),
+});
+
+export const AgentGraphState = new StateSchema({
+  runId: AgentGraphStateValueSchema.shape.runId,
+  topic: AgentGraphStateValueSchema.shape.topic,
+  maxRevisions: AgentGraphStateValueSchema.shape.maxRevisions,
+  plan: AgentGraphStateValueSchema.shape.plan,
+  evidence: AgentGraphStateValueSchema.shape.evidence,
+  stories: AgentGraphStateValueSchema.shape.stories,
+  draft: AgentGraphStateValueSchema.shape.draft,
+  critique: AgentGraphStateValueSchema.shape.critique,
+  approved: AgentGraphStateValueSchema.shape.approved,
+  reviewRoute: AgentGraphStateValueSchema.shape.reviewRoute,
+  revisionCount: AgentGraphStateValueSchema.shape.revisionCount,
+  trace: new ReducedValue(AgentGraphStateValueSchema.shape.trace, {
+    reducer: (current, update) => current.concat(update),
+  }),
 });
 
 export type AgentGraphStateValue = typeof AgentGraphState.State;

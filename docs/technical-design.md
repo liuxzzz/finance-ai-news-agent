@@ -537,7 +537,7 @@ interface MemoryService {
 
 ### 7.1 运行与配置
 
-- `agent_runs`
+- `runs`
   - `id`, `tenant_id`, `report_date`, `edition`, `status`
   - `scheduled_at`, `started_at`, `finished_at`
   - `config_snapshot`, `prompt_versions`, `model_snapshot`
@@ -565,6 +565,8 @@ interface MemoryService {
   - 分项得分、总分、理由、评分器版本
 - `digests`
   - 结构化 JSON、Markdown、内容哈希、生成版本、状态
+- `artifacts`
+  - Run 产生的不可变渲染制品、媒体类型、内容与内容哈希
 - `deliveries`
   - 目标、`delivery_key`、制品哈希、状态、外部 message/document ID、错误
 

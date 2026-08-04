@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "PostgreSQL storage adapter skeleton.",
+  "description": "PostgreSQL runtime storage and LangGraph checkpoint adapter.",
   "license": "Apache-2.0",
   "exports": {
     ".": {
@@ -19,6 +19,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@finance-ai-news-agent/plugin-sdk": "workspace:*",
+    "@langchain/langgraph-checkpoint-postgres": "1.0.4",
     "pg": "8.22.0"
   },
   "devDependencies": {

@@ -3,8 +3,8 @@
 一个 AI-first、面向开源的信息研究 Agent。目标是每天通过 MCP 研究金融与 AI
 领域的信息，完成整理、简报输出和记忆沉淀。
 
-当前仓库是可运行的工程骨架：只包含角色编排、插件接口和离线 Fixture
-Demo，不包含真实新闻采集、Prompt 或业务规则。
+当前仓库已经具备可恢复的运行骨架：包含角色编排、持久化 Runtime、插件接口和离线
+Fixture Demo；真实新闻采集、Prompt 和业务规则仍待接入。
 
 ## 项目原则
 
@@ -68,11 +68,23 @@ pnpm studio
 Studio 会显示 Graph 结构、节点执行轨迹以及每一步的状态变化。本地 Studio Graph 仍使用
 Fixture Handler，不会访问模型、MCP、数据库或外部网络。
 
-如需启动预留的 PostgreSQL + pgvector：
+### 持久化 Runtime
+
+启动 PostgreSQL、执行迁移，然后运行使用 Fixture Handler 的持久化工作流：
 
 ```bash
 docker compose up -d postgres
+export DATABASE_URL=postgresql://agent:agent@localhost:5432/finance_ai_news
+pnpm db:migrate
+pnpm run:fixture -- --report-date 2026-08-04 --edition daily
 ```
+
+再次使用相同的 `tenant + report-date + edition` 触发时会复用同一个逻辑 Run。失败后执行相同
+命令会从持久化的 Run/Stage 和 LangGraph checkpoint 恢复。`--dry-run` 会持久化制品但跳过发送；
+随后用相同参数移除 `--dry-run`，会发送已有制品而不会重新执行 Agent Graph。
+
+CLI 还支持 `status <run-id>` 查询 Run、Stage 和 Delivery 审计记录。当前 `run` 命令仍使用
+Fixture Handler，目的是先验证 Runtime；真实模型将在下一阶段接入。
 
 ## Workspace
 
@@ -80,16 +92,17 @@ docker compose up -d postgres
 apps/
   cli/                   CLI 与离线 Demo
 packages/
-  core/                  LangGraph Agent Graph
+  core/                  LangGraph Agent Graph 与确定性 Runtime
   plugin-sdk/            框架无关的公开插件接口
 plugins/
   model-ai-sdk/          AI SDK ModelProvider Adapter
   output-file/           本地 Markdown 输出
   source-mcp/            官方 MCP SDK Client 骨架
-  storage-postgres/      PostgreSQL Pool 骨架
+  storage-postgres/      Run/Stage Repository、迁移与 LangGraph checkpoint
 presets/
   finance-ai/            Finance & AI 官方 Preset 占位
-db/init/                 pgvector 初始化
+db/init/                 pgvector 首次初始化
+db/migrations/           版本化业务迁移
 docs/                    技术方案
 ```
 
@@ -97,6 +110,8 @@ docs/                    技术方案
 
 ```bash
 pnpm demo          # 构建并执行离线 Demo
+pnpm db:migrate    # 执行 PostgreSQL 版本化迁移
+pnpm run:fixture   # 执行/恢复持久化 Fixture Run
 pnpm studio        # 启动本地 Agent Server 和 Studio
 pnpm build         # 构建所有 workspace packages
 pnpm typecheck     # TypeScript 类型检查
@@ -113,9 +128,12 @@ pnpm check         # 完整 CI 检查
 - [x] 框架无关的 Plugin SDK
 - [x] MCP、AI SDK、PostgreSQL、文件输出适配器骨架
 - [x] PostgreSQL + pgvector 本地环境
+- [x] Run/Stage/Artifact/Delivery 持久化 Runtime
+- [x] 重复触发幂等、失败恢复、发布门禁和审计查询
+- [x] PostgreSQL LangGraph durable checkpoint
 - [x] 单元测试与 CI
 - [ ] 真实模型、MCP 来源和飞书配置
-- [ ] 业务 Prompt、评测集、数据表与记忆实现
+- [ ] 业务 Prompt、评测集与长期记忆实现
 
 当前代码分层、运行流程和目录职责见
 [当前架构与目录说明](docs/architecture.md)；完整目标方案见

@@ -1,4 +1,11 @@
-import { END, MemorySaver, START, StateGraph, type GraphNode } from "@langchain/langgraph";
+import {
+  END,
+  MemorySaver,
+  START,
+  StateGraph,
+  type BaseCheckpointSaver,
+  type GraphNode,
+} from "@langchain/langgraph";
 
 import {
   AgentGraphState,
@@ -17,7 +24,7 @@ export interface AgentNodeHandlers {
 }
 
 export interface CreateAgentGraphOptions {
-  checkpoint?: boolean;
+  checkpointer?: BaseCheckpointSaver | false;
 }
 
 export function createAgentGraph(
@@ -47,11 +54,11 @@ export function createAgentGraph(
       [END, "research", "curate_write"],
     );
 
-  if (options.checkpoint === false) {
+  if (options.checkpointer === false) {
     return graph.compile();
   }
 
   return graph.compile({
-    checkpointer: new MemorySaver(),
+    checkpointer: options.checkpointer ?? new MemorySaver(),
   });
 }

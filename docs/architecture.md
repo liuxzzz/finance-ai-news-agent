@@ -6,17 +6,19 @@
 
 ## 1. 当前阶段
 
-项目目前处于“可运行的工程骨架”阶段，已经具备：
+项目目前处于“可恢复运行骨架”阶段，已经具备：
 
 - pnpm monorepo、统一 TypeScript 配置和质量检查命令；
 - 基于 LangGraph.js 的三节点 Agent Graph；
 - 框架无关的插件公共契约；
-- AI SDK 模型、本地文件输出、MCP Client 和 PostgreSQL Pool 适配器骨架；
+- 确定性 `RunExecutor`、Run/Stage 状态机、发布门禁和审计接口；
+- PostgreSQL Runtime Store、版本化迁移、运行锁和 LangGraph durable checkpoint；
+- AI SDK 模型、本地文件输出和 MCP Client 适配器骨架；
 - 完全离线、无需模型密钥和外部服务的 Fixture Demo；
 - PostgreSQL + pgvector 的本地基础设施配置。
 
-目前尚未接入真实新闻来源、业务 Prompt、模型调用、数据库持久化和长期记忆。换句话说，
-当前代码验证的是**模块边界和执行闭环**，不是可直接用于生产的新闻研究系统。
+目前尚未接入真实新闻来源、业务 Prompt、模型调用和长期记忆。当前代码已经验证
+**模块边界、持久化执行闭环和故障恢复**，但还不是可直接用于生产的新闻研究系统。
 
 ## 2. 总体架构
 
@@ -26,33 +28,37 @@
 ```mermaid
 flowchart LR
     User[开发者 / 命令行] --> CLI[apps/cli]
-    CLI --> Core[packages/core]
+    CLI --> Runtime[RunExecutor]
+    Runtime --> Core[LangGraph Agent Graph]
     CLI --> Output[plugins/output-file]
+    CLI --> Storage[plugins/storage-postgres]
 
     Core --> Graph[LangGraph.js]
-    Core -. 公共能力边界 .-> SDK[packages/plugin-sdk]
+    Runtime -. RuntimeStore 边界 .-> SDK[packages/plugin-sdk]
+    Core -. 公共能力边界 .-> SDK
     Output --> SDK
+    Storage --> SDK
 
     Model[plugins/model-ai-sdk] --> SDK
     Model --> AISDK[AI SDK]
     Source[plugins/source-mcp] --> MCP[MCP TypeScript SDK]
-    Storage[plugins/storage-postgres] --> PG[PostgreSQL Driver]
+    Storage --> PG[(PostgreSQL)]
+    Storage --> Checkpoint[LangGraph PostgresSaver]
 
     Source -. 尚未接入 Demo .-> CLI
     Model -. 尚未接入 Demo .-> CLI
-    Storage -. 尚未接入 Demo .-> CLI
 ```
 
 各层职责如下：
 
-| 层级                  | 当前职责                                                | 不负责的内容                                 |
-| --------------------- | ------------------------------------------------------- | -------------------------------------------- |
-| `apps/cli`            | 命令解析、依赖组装、Fixture Handler、触发执行和输出制品 | Agent 图的结构、通用插件协议                 |
-| `packages/core`       | Agent 状态、节点图、分支与修订循环                      | 具体模型厂商、MCP 传输、数据库驱动、输出渠道 |
-| `packages/plugin-sdk` | 定义稳定、框架无关的外部能力接口和数据契约              | 任何第三方 SDK 的具体实现                    |
-| `plugins/*`           | 将第三方 SDK 或本地能力适配到项目边界                   | 决定业务流程和 Agent 节点顺序                |
-| `presets` / `prompts` | 预留业务主题、角色指令、栏目和评测配置                  | 通用运行时能力                               |
-| `db` / `compose.yaml` | 提供本地 PostgreSQL + pgvector 环境                     | 当前 Demo 的状态保存；Demo 仍使用内存检查点  |
+| 层级                  | 当前职责                                         | 不负责的内容                                 |
+| --------------------- | ------------------------------------------------ | -------------------------------------------- |
+| `apps/cli`            | 命令解析、依赖组装、迁移、Fixture Run 和审计查询 | Agent 图的结构、通用插件协议                 |
+| `packages/core`       | Agent 图、确定性 Runtime、恢复、发布门禁         | 具体模型厂商、MCP 传输、数据库驱动、输出渠道 |
+| `packages/plugin-sdk` | 定义稳定、框架无关的外部能力接口和数据契约       | 任何第三方 SDK 的具体实现                    |
+| `plugins/*`           | 将第三方 SDK 或本地能力适配到项目边界            | 决定业务流程和 Agent 节点顺序                |
+| `presets` / `prompts` | 预留业务主题、角色指令、栏目和评测配置           | 通用运行时能力                               |
+| `db` / `compose.yaml` | PostgreSQL 环境和版本化业务迁移                  | Agent 语义决策                               |
 
 ### 2.1 依赖方向
 
@@ -71,8 +77,8 @@ apps  ──────>  core  ──────>  plugin-sdk
 - 插件不能决定 Agent 工作流，也不应依赖 Core 的内部实现；
 - Core 和公共契约不绑定“金融 + AI”主题，领域配置最终应放入 Preset 和 Prompt。
 
-当前 `source-mcp` 与 `storage-postgres` 仍是底层 Client/Pool 工厂，还没有实现 Plugin SDK
-中的 `McpGateway` 或 `MemoryPort`；它们属于已建立依赖边界、尚未完成业务接线的骨架。
+当前 `storage-postgres` 已实现 Plugin SDK 的 `RuntimeStore`；`source-mcp` 仍是底层 Client
+工厂，尚未实现 `McpGateway`。长期记忆的 `MemoryPort` 也尚无实现。
 
 ## 3. Agent Graph
 
@@ -132,8 +138,11 @@ Review 的条件分支规则是：
 状态字段使用 Zod 描述，既提供 TypeScript 类型推导，也在图运行时约束状态形状。
 除 `runId` 和 `topic` 外，其余字段都定义了默认值。
 
-默认使用 LangGraph `MemorySaver` 保存图检查点，它只适合本地运行和测试。传入
-`{ checkpoint: false }` 可以关闭检查点。PostgreSQL 当前尚未参与 Agent 状态持久化。
+默认使用 LangGraph `MemorySaver`，适合 Demo 和单元测试；传入 `{ checkpointer: false }`
+可以关闭检查点，传入 PostgreSQL `PostgresSaver` 则支持进程重启后的节点级恢复。
+
+LangGraph checkpoint 与产品 Runtime 状态用途不同：前者记录图执行到哪个节点，后者通过
+`runs`、`run_stages`、`artifacts` 和 `deliveries` 记录逻辑任务、技术重试、不可变制品和外部副作用。
 
 ## 5. Demo 端到端流程
 
@@ -143,26 +152,29 @@ Review 的条件分支规则是：
 sequenceDiagram
     participant Script as 根 package script
     participant CLI as apps/cli
-    participant Core as packages/core
+    participant Runtime as RunExecutor
     participant Graph as LangGraph
     participant File as output-file
 
     Script->>Script: 构建全部 workspace package
     Script->>CLI: 执行 demo 命令
-    CLI->>CLI: 生成 runId 和 Fixture Handlers
-    CLI->>Core: createAgentGraph(handlers)
-    Core->>Graph: 编译 StateGraph + MemorySaver
-    CLI->>Graph: invoke(initialState, thread_id)
+    CLI->>Runtime: 注入 InMemoryRuntimeStore 和 Fixture Workflow
+    Runtime->>Runtime: 创建唯一 Run，记录 agent_graph Stage
+    Runtime->>Graph: invoke(initialState, thread_id)
     Graph->>Graph: 三节点执行并完成一次定向修订
-    Graph-->>CLI: 返回最终共享状态
-    CLI->>CLI: 渲染 Markdown 制品
-    CLI->>File: deliver(artifact)
-    File-->>CLI: 返回 DeliveryReceipt
+    Graph-->>Runtime: 返回最终共享状态
+    Runtime->>Runtime: approved 门禁并持久化内存制品
+    Runtime->>File: 使用稳定 delivery_key 发送
+    File-->>Runtime: 返回 DeliveryReceipt
+    Runtime-->>CLI: Run / Artifact / Delivery 结果
 ```
 
 默认产物是根目录下的 `.artifacts/demo-digest.md`。可以通过 `AGENT_OUTPUT_PATH`
 覆盖输出路径。该流程不会读取 `.env.example` 中的数据库配置，也不会调用模型、MCP
 或外部网络。
+
+`pnpm run:fixture` 使用同一套 Runtime，但注入 `PostgresRuntimeStore` 和 `PostgresSaver`；它支持
+重复触发复用、失败恢复以及 `status <run-id>` 审计查询。
 
 ## 6. Plugin SDK
 
@@ -174,7 +186,8 @@ sequenceDiagram
 | `ModelProvider`  | 接收角色、系统提示和用户提示，返回文本、模型名和 token 用量 | `model-ai-sdk` 已适配 `generateText`，未接入 Demo  |
 | `McpGateway`     | 列出允许的工具并执行结构化工具调用                          | 已定义接口；`source-mcp` 目前仅创建原始 MCP Client |
 | `MemoryPort`     | 搜索记忆和提交记忆候选                                      | 已定义接口；暂无实现                               |
-| `OutputPlugin`   | 发送已渲染制品并返回发送回执                                | `output-file` 已实现并用于 Demo                    |
+| `OutputPlugin`   | 按稳定 `deliveryKey` 幂等发送并返回回执                     | `output-file` 已实现并通过幂等契约测试             |
+| `RuntimeStore`   | 持久化 Run、Stage、Artifact、Delivery 和运行锁              | PostgreSQL 与内存实现均已接入                      |
 
 `PluginKindSchema` 预留了 `model`、`embedding`、`source`、`storage` 和 `output`
 五类插件，但当前还没有为每一类都提供完整接口和实现。
@@ -186,15 +199,16 @@ sequenceDiagram
 ├── apps/
 │   └── cli/                      # 命令行入口与当前 Composition Root
 ├── packages/
-│   ├── core/                     # Agent 状态和 LangGraph 节点编排
+│   ├── core/                     # Agent Graph 与确定性 Runtime
 │   └── plugin-sdk/               # 框架无关的公共插件契约
 ├── plugins/
 │   ├── model-ai-sdk/             # AI SDK -> ModelProvider 适配器
 │   ├── output-file/              # Markdown/文本制品写入本地文件
 │   ├── source-mcp/               # 官方 MCP SDK Client 骨架
-│   └── storage-postgres/         # PostgreSQL Pool 工厂骨架
+│   └── storage-postgres/         # Runtime Store、迁移和 durable checkpoint
 ├── db/
-│   └── init/                     # 数据库容器首次启动时执行的初始化 SQL
+│   ├── init/                     # 数据库容器首次启动时执行的初始化 SQL
+│   └── migrations/               # 可重复部署的版本化业务迁移
 ├── docs/                         # 当前架构与目标技术方案
 ├── presets/
 │   └── finance-ai/               # 金融与 AI 领域 Preset 占位
@@ -209,19 +223,22 @@ sequenceDiagram
 
 ### 7.1 `apps/cli`
 
-- `src/index.ts`：可执行程序入口，解析 `demo` 命令并展示帮助信息；
-- `src/demo.ts`：当前系统的组装入口，运行 Agent Graph、渲染 Markdown，并调用文件输出插件；
+- `src/index.ts`：解析 `demo`、`migrate`、`run` 和 `status` 命令；
+- `src/demo.ts`：组装内存 Runtime、运行 Agent Graph 并输出 Markdown；
+- `src/runtime-command.ts`：组装 PostgreSQL Runtime、迁移、持久化执行和审计查询；
 - `src/fixture-handlers.ts`：定义 Research、Curate & Write、Review 三个离线 Fixture Handler；
 - `src/studio-graph.ts`：导出供 LangGraph Studio 加载的无本地 checkpointer Graph；
 - `package.json`：声明 CLI 二进制名和对 Core、Plugin SDK、File Output 的依赖。
 
-未来真实运行命令、配置加载、插件选择和依赖注入也应从这一层进入，避免把部署细节放进
-Core。
+未来真实 Handler、配置加载和插件选择也从这一层注入，避免把部署细节放进 Core。
 
 ### 7.2 `packages/core`
 
 - `src/agent-state.ts`：定义 Evidence、Story 和 Agent Graph 的共享状态；
 - `src/agent-graph.ts`：定义三节点顺序、Review 条件分支、修订上限和检查点策略；
+- `src/agent-workflow.ts`：封装 LangGraph 首次执行与 checkpoint 恢复；
+- `src/run-executor.ts`：负责 Run 幂等、Stage 恢复、发布门禁、制品和发送；
+- `src/in-memory-runtime-store.ts`：为 Demo 和离线测试提供 RuntimeStore；
 - `src/index.ts`：Core 的公开导出面，调用方不需要引用内部文件；
 - `src/agent-graph.test.ts`：验证定向修订、Research 补证、预算耗尽和执行轨迹。
 
@@ -241,8 +258,8 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 - `output-file`：确保目标目录存在后写入 UTF-8 文件，是当前唯一接入执行闭环的插件；
 - `source-mcp`：创建官方 MCP SDK `Client`，尚未实现连接传输、工具白名单和
   `McpGateway`；
-- `storage-postgres`：创建 `pg.Pool`，尚未包含表结构、Repository 或 `MemoryPort`
-  实现。
+- `storage-postgres`：提供 `PostgresRuntimeStore`、session advisory lock、带 checksum 的迁移
+  runner 和 LangGraph `PostgresSaver`；长期记忆的 `MemoryPort` 尚未实现。
 
 ### 7.5 `db` 与 `compose.yaml`
 
@@ -250,8 +267,9 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 `finance_ai_news`。`db/init/001_extensions.sql` 在数据库首次初始化时启用 `vector`
 扩展。
 
-当前没有业务表迁移，删除并重建数据卷才会重新执行 `db/init`。这些配置用于后续持久化开发，
-不是运行 Fixture Demo 的前置条件。
+`db/migrations` 当前创建 `runs`、`run_stages`、`artifacts` 和 `deliveries`。迁移 runner 使用
+全局 advisory lock、checksum 和逐文件事务；它与只在数据卷首次创建时执行的 `db/init` 分离。
+离线 `pnpm demo` 不需要数据库，持久化 `pnpm run:fixture` 需要先执行 `pnpm db:migrate`。
 
 ### 7.6 `presets` 与 `prompts`
 
@@ -280,18 +298,18 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 
 ## 8. 当前完成度与目标架构的差距
 
-| 能力                   | 当前状态                 | 下一步接线位置                                     |
-| ---------------------- | ------------------------ | -------------------------------------------------- |
-| 三节点编排与有限修订   | 已实现                   | 接入真实 `ModelProvider` Handler                   |
-| 离线研究闭环           | 已实现                   | `apps/cli/src/demo.ts`                             |
-| 本地文件输出           | 已实现                   | `plugins/output-file`                              |
-| 真实模型调用           | 适配器已存在，未组装     | CLI/未来 Runtime 注入 `ModelProvider`              |
-| MCP 新闻采集           | 仅 MCP Client 骨架       | `plugins/source-mcp` 实现 `McpGateway`/Source 契约 |
-| PostgreSQL 持久化      | 仅 Pool 与 pgvector 环境 | `plugins/storage-postgres` + 数据库迁移            |
-| 长期记忆               | 只有公共接口             | `MemoryPort` 与确定性 Memory Service 实现          |
-| 业务 Prompt/Preset     | 目录占位                 | `prompts/`、`presets/finance-ai/`                  |
-| 生产级幂等、审计、恢复 | 仅内存检查点             | 持久化 Runtime 与 Run/Stage 数据模型               |
-| 飞书输出、评测与观测   | 未实现                   | 新插件和独立 eval/observability 模块               |
+| 能力                 | 当前状态                         | 下一步接线位置                                     |
+| -------------------- | -------------------------------- | -------------------------------------------------- |
+| 三节点编排与有限修订 | 已实现                           | 接入真实 `ModelProvider` Handler                   |
+| 离线研究闭环         | 已实现                           | `apps/cli/src/demo.ts`                             |
+| 本地文件输出         | 已实现                           | `plugins/output-file`                              |
+| 真实模型调用         | 适配器已存在，未组装             | CLI/未来 Runtime 注入 `ModelProvider`              |
+| MCP 新闻采集         | 仅 MCP Client 骨架               | `plugins/source-mcp` 实现 `McpGateway`/Source 契约 |
+| PostgreSQL Runtime   | 已实现 Run/Stage、迁移、锁和恢复 | 后续扩展内容与长期记忆表                           |
+| 长期记忆             | 只有公共接口                     | `MemoryPort` 与确定性 Memory Service 实现          |
+| 业务 Prompt/Preset   | 目录占位                         | `prompts/`、`presets/finance-ai/`                  |
+| 运行幂等、审计、恢复 | 已实现并接入 CLI                 | 补真实 PostgreSQL 并发集成测试与可观测性           |
+| 飞书输出、评测与观测 | 未实现                           | 新插件和独立 eval/observability 模块               |
 
 在继续开发时，应优先保持现有边界：Core 只表达流程与领域状态，第三方能力通过 Plugin SDK
 接入，CLI/Runtime 负责组装，Preset 和 Prompt 负责领域差异。

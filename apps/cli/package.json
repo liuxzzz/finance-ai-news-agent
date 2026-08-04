@@ -12,11 +12,18 @@
     "build": "tsc -p tsconfig.json",
     "demo": "node dist/index.js demo",
     "dev": "tsx src/index.ts demo",
+    "migrate": "node dist/index.js migrate",
+    "run:fixture": "node dist/index.js run",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@finance-ai-news-agent/core": "workspace:*",
     "@finance-ai-news-agent/output-file": "workspace:*",
-    "@finance-ai-news-agent/plugin-sdk": "workspace:*"
+    "@finance-ai-news-agent/plugin-sdk": "workspace:*",
+    "@finance-ai-news-agent/storage-postgres": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "4.0.18"
   }
 }
