@@ -117,10 +117,28 @@ Evidence 的 ID，最终 Markdown 中的来源 URL 由程序从 Evidence 确定�
 
 `run-live` 使用 DeepSeek Function Calling 选择内部只读 `search_news` 工具。工具直接读取配置的
 RSS Feed，按关键词相关度与发布时间选取新闻，再转换成受 Schema 保护的 Evidence；不需要 MCP
-Server。默认 Feed 是 36氪、虎嗅和 InfoQ：
+Server。未设置 `RSS_FEED_IDS` 时，默认 Feed 是 36氪、虎嗅和 InfoQ。设置 `RSS_FEED_IDS`
+后，采集列表就是这些内置目录项；若同时提供 `RSS_FEED_URLS`，目录项在前，尚未出现的自定义
+URL 接在后面。目录只做离线配置校验，拉取仍由运行时逐个 Feed 执行，单个来源失败不会阻断其他来源。
+
+| ID                 | 主题 | 来源                 |
+| ------------------ | ---- | -------------------- |
+| `sec-press`        | 金融 | 美国证监会新闻稿     |
+| `federal-reserve`  | 金融 | 美联储新闻稿         |
+| `ecb-press`        | 金融 | 欧洲央行新闻稿       |
+| `wallstreetcn`     | 金融 | 华尔街见闻           |
+| `openai-news`      | AI   | OpenAI News          |
+| `google-ai`        | AI   | Google AI Blog       |
+| `deepmind`         | AI   | Google DeepMind Blog |
+| `huggingface-blog` | AI   | Hugging Face Blog    |
+| `qbitai`           | AI   | 量子位               |
+| `36kr`             | 综合 | 36氪                 |
+| `huxiu`            | 综合 | 虎嗅                 |
+| `infoq`            | 综合 | InfoQ                |
 
 ```bash
-# 可在被 Git 忽略的 .env.local 中覆盖；多个 Feed 使用英文逗号分隔
+# 可在被 Git 忽略的 .env.local 中覆盖；多个值使用英文逗号分隔
+# RSS_FEED_IDS=sec-press,federal-reserve,ecb-press,wallstreetcn,openai-news,google-ai,deepmind,qbitai
 RSS_FEED_URLS=https://36kr.com/feed,https://rss.huxiu.com/,https://www.infoq.cn/feed
 RSS_TIMEOUT_MS=5000
 RSS_MAX_TOOL_CALLS=1
@@ -276,7 +294,8 @@ pnpm check         # 完整 CI 检查
 - [x] Docker 一次性 Worker 部署入口
 - [x] 单元测试与 CI
 - [x] 36氪、虎嗅和 InfoQ RSS 真实网络拉取冒烟验收
-- [ ] 扩展更多专业金融/AI RSS/API 来源
+- [x] 可通过 `RSS_FEED_IDS` 选择内置专业金融与 AI RSS 来源
+- [ ] 扩展更多专业金融/AI API 来源
 - [ ] 向量语义检索、用户偏好、反馈和在线评测基线
 
 当前代码分层、运行流程和目录职责见

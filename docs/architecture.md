@@ -338,7 +338,7 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 | 离线研究闭环         | 已实现                                    | `apps/cli/src/demo.ts`            |
 | 本地文件输出         | 已实现                                    | `plugins/output-file`             |
 | 真实模型调用         | DeepSeek 已组装并完成冒烟验收             | 增加评测基线与更多模型 Provider   |
-| RSS 新闻采集         | 三个 Feed、来源审计与失败隔离已实现       | 增加更多专业金融/AI Feed          |
+| RSS 新闻采集         | 默认三个综合 Feed，支持专业金融/AI 目录   | 增加 API 来源                     |
 | PostgreSQL Runtime   | Run/Stage、来源、内容、锁和恢复已实现     | 后续扩展语义记忆表                |
 | 长期记忆             | 已实现精确历史去重与 Story 事件进展时间线 | 增加向量检索、偏好与反馈          |
 | 业务 Prompt/Preset   | 目录占位                                  | `prompts/`、`presets/finance-ai/` |

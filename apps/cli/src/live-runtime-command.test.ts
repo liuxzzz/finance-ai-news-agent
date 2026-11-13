@@ -12,6 +12,10 @@ describe("live RSS research configuration", () => {
       }),
     ).toEqual({
       feedUrls: ["https://36kr.com/feed", "https://example.com/ai.xml"],
+      feeds: [
+        { id: "feed-1", url: "https://36kr.com/feed" },
+        { id: "feed-2", url: "https://example.com/ai.xml" },
+      ],
       timeoutMs: 7000,
       maxToolCalls: 6,
       maxItemAgeHours: 48,
@@ -26,6 +30,11 @@ describe("live RSS research configuration", () => {
   it("uses the three built-in feeds and safe limits by default", () => {
     expect(resolveLiveResearchConfig({})).toEqual({
       feedUrls: ["https://36kr.com/feed", "https://rss.huxiu.com/", "https://www.infoq.cn/feed"],
+      feeds: [
+        { id: "feed-1", url: "https://36kr.com/feed" },
+        { id: "feed-2", url: "https://rss.huxiu.com/" },
+        { id: "feed-3", url: "https://www.infoq.cn/feed" },
+      ],
       timeoutMs: 5000,
       maxToolCalls: 1,
       maxItemAgeHours: 48,
@@ -74,6 +83,28 @@ describe("live RSS research configuration", () => {
         RSS_MAX_CANDIDATE_EVIDENCE: "8",
       }),
     ).toThrow("integer from 12 to 24");
+  });
+
+  it("uses catalog ids and names when RSS_FEED_IDS is set", () => {
+    expect(
+      resolveLiveResearchConfig({
+        RSS_FEED_IDS: "sec-press,openai-news",
+      }),
+    ).toMatchObject({
+      feedUrls: ["https://www.sec.gov/news/pressreleases.rss", "https://openai.com/news/rss.xml"],
+      feeds: [
+        {
+          id: "sec-press",
+          name: "U.S. SEC Press Releases",
+          topic: "finance",
+        },
+        {
+          id: "openai-news",
+          name: "OpenAI News",
+          topic: "ai",
+        },
+      ],
+    });
   });
 });
 
