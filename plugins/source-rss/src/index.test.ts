@@ -329,6 +329,50 @@ describe("RSS news gateway", () => {
       ],
     });
   });
+
+  it("collapses tracking parameters and fragments before ranking", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "sec-press", url: "https://www.sec.gov/news/pressreleases.rss" }],
+      now: () => Date.parse("2026-08-04T12:00:00.000Z"),
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "AI rule older copy",
+            link: "https://www.sec.gov/news/press-release/ai-rule?utm_source=rss&id=7#body",
+            isoDate: "2026-08-04T08:00:00.000Z",
+          },
+          {
+            title: "AI rule latest copy",
+            link: "https://www.sec.gov/news/press-release/ai-rule?id=7&utm_medium=feed",
+            isoDate: "2026-08-04T10:00:00.000Z",
+          },
+          {
+            title: "Separate filing",
+            link: "https://www.sec.gov/news/press-release/other?ref=rss",
+            isoDate: "2026-08-04T09:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool({
+      id: "tracked",
+      name: "search_news",
+      arguments: { query: "unmatched", limit: 5 },
+    });
+    const items = (result.content as { items: Array<{ title: string; url: string }> }).items;
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        title: "AI rule latest copy",
+        url: "https://www.sec.gov/news/press-release/ai-rule?id=7",
+      }),
+      expect.objectContaining({
+        title: "Separate filing",
+        url: "https://www.sec.gov/news/press-release/other",
+      }),
+    ]);
+  });
 });
 
 class RecordingSourceAudit implements SourceAuditStore {

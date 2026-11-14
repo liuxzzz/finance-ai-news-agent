@@ -12,6 +12,19 @@ import type {
 import Parser from "rss-parser";
 import { z } from "zod";
 
+const TRACKING_PARAMETERS = new Set([
+  "f",
+  "from",
+  "ref",
+  "rss",
+  "source",
+  "spm",
+  "utm_campaign",
+  "utm_content",
+  "utm_medium",
+  "utm_source",
+  "utm_term",
+]);
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_CACHE_TTL_MS = 60_000;
 const DEFAULT_MAX_ITEM_AGE_HOURS = 48;
@@ -406,12 +419,29 @@ function articleUrl(item: ParsedRssItem, feedUrl: string): URL | null {
     const resolved = safeHttpUrl(link, feedUrl);
 
     if (resolved !== null) {
-      return resolved;
+      return canonicalizeArticleUrl(resolved);
     }
   }
 
   const guid = item.guid?.trim();
-  return guid === undefined || guid.length === 0 ? null : safeHttpUrl(guid);
+  const guidUrl = guid === undefined || guid.length === 0 ? null : safeHttpUrl(guid);
+  return guidUrl === null ? null : canonicalizeArticleUrl(guidUrl);
+}
+
+function canonicalizeArticleUrl(url: URL): URL {
+  const canonical = new URL(url.toString());
+  canonical.hash = "";
+
+  for (const name of [...canonical.searchParams.keys()]) {
+    const normalized = name.toLocaleLowerCase("en-US");
+
+    if (TRACKING_PARAMETERS.has(normalized) || normalized.startsWith("utm_")) {
+      canonical.searchParams.delete(name);
+    }
+  }
+
+  canonical.searchParams.sort();
+  return canonical;
 }
 
 function safeHttpUrl(value: string, baseUrl?: string): URL | null {
