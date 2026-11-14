@@ -251,6 +251,52 @@ describe("RSS news gateway", () => {
       ]),
     );
   });
+
+  it("resolves relative article links and falls back to absolute permalink guids", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "36kr", name: "36氪", url: "https://36kr.com/feed" }],
+      now: () => Date.parse("2026-08-04T12:00:00.000Z"),
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "相对链接稿件",
+            link: "/p/relative-ai",
+            isoDate: "2026-08-04T09:00:00.000Z",
+          },
+          {
+            title: "协议相对稿件",
+            link: "//cdn.36kr.com/p/protocol",
+            isoDate: "2026-08-04T08:00:00.000Z",
+          },
+          {
+            title: "只有永久链接",
+            guid: "https://36kr.com/p/guid-only",
+            isoDate: "2026-08-04T07:00:00.000Z",
+          },
+          {
+            title: "危险链接被忽略",
+            link: "javascript:alert(1)",
+            guid: "opaque-guid",
+            isoDate: "2026-08-04T06:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool({
+      id: "links",
+      name: "search_news",
+      arguments: { query: "unmatched", limit: 10 },
+    });
+    const items = (result.content as { items: Array<{ title: string; url: string }> }).items;
+
+    expect(items.map((item) => item.url)).toEqual([
+      "https://36kr.com/p/relative-ai",
+      "https://cdn.36kr.com/p/protocol",
+      "https://36kr.com/p/guid-only",
+    ]);
+    expect(items.map((item) => item.title)).not.toContain("危险链接被忽略");
+  });
 });
 
 class RecordingSourceAudit implements SourceAuditStore {

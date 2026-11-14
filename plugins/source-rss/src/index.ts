@@ -246,7 +246,15 @@ export class RssNewsGateway implements ToolGateway {
           const feed = await this.parseFeed(configuredFeed.url);
           const source = configuredFeed.name ?? cleanText(feed.title ?? "") ?? configuredFeed.id;
           const normalized = feed.items
-            .map((item) => normalizeItem(item, configuredFeed.id, source, this.maxExcerptChars))
+            .map((item) =>
+              normalizeItem(
+                item,
+                configuredFeed.id,
+                source,
+                configuredFeed.url,
+                this.maxExcerptChars,
+              ),
+            )
             .filter((item): item is LoadedRssItem => item !== null);
           const finishedAt = new Date(this.now()).toISOString();
 
@@ -355,28 +363,13 @@ function normalizeItem(
   item: ParsedRssItem,
   sourceId: string,
   source: string,
+  feedUrl: string,
   maxExcerptChars: number,
 ): LoadedRssItem | null {
   const title = cleanText(item.title ?? "");
-  const link = item.link?.trim();
+  const url = articleUrl(item, feedUrl);
 
-  if (title === null || link === undefined || link.length === 0) {
-    return null;
-  }
-
-  let url: URL;
-
-  try {
-    url = new URL(link);
-  } catch {
-    return null;
-  }
-
-  if (
-    (url.protocol !== "https:" && url.protocol !== "http:") ||
-    url.username.length > 0 ||
-    url.password.length > 0
-  ) {
+  if (title === null || url === null) {
     return null;
   }
 
@@ -404,6 +397,39 @@ function normalizeItem(
     contentHash,
     raw,
   };
+}
+
+function articleUrl(item: ParsedRssItem, feedUrl: string): URL | null {
+  const link = item.link?.trim();
+
+  if (link !== undefined && link.length > 0) {
+    const resolved = safeHttpUrl(link, feedUrl);
+
+    if (resolved !== null) {
+      return resolved;
+    }
+  }
+
+  const guid = item.guid?.trim();
+  return guid === undefined || guid.length === 0 ? null : safeHttpUrl(guid);
+}
+
+function safeHttpUrl(value: string, baseUrl?: string): URL | null {
+  try {
+    const url = baseUrl === undefined ? new URL(value) : new URL(value, baseUrl);
+
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username.length > 0 ||
+      url.password.length > 0
+    ) {
+      return null;
+    }
+
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 function selectLatestRelevantItems(
