@@ -297,6 +297,38 @@ describe("RSS news gateway", () => {
     ]);
     expect(items.map((item) => item.title)).not.toContain("危险链接被忽略");
   });
+
+  it("decodes numeric HTML entities before ranking and model use", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "sec-press", name: "SEC", url: "https://www.sec.gov/news/pressreleases.rss" }],
+      now: () => Date.parse("2026-08-04T12:00:00.000Z"),
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "&#20013;&#x6587; &#65;I &#39;芯片&#39;",
+            link: "https://www.sec.gov/news/press-release/ai",
+            isoDate: "2026-08-04T09:00:00.000Z",
+            contentSnippet: "增长 &gt; 10&#160;%",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool({
+      id: "entities",
+      name: "search_news",
+      arguments: { query: "中文", limit: 1 },
+    });
+
+    expect(result.content).toEqual({
+      items: [
+        expect.objectContaining({
+          title: "中文 AI '芯片'",
+          excerpt: "增长 > 10 %",
+        }),
+      ],
+    });
+  });
 });
 
 class RecordingSourceAudit implements SourceAuditStore {

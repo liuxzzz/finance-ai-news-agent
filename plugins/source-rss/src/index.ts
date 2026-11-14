@@ -549,17 +549,40 @@ function serializeError(error: unknown) {
 }
 
 function cleanText(value: string): string | null {
-  const normalized = value
-    .replace(/<[^>]*>/g, " ")
+  const normalized = decodeHtmlEntities(value.replace(/<[^>]*>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.length === 0 ? null : normalized;
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-  return normalized.length === 0 ? null : normalized;
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d{1,7});/g, (entity, digits: string) =>
+      decodeNumericEntity(Number(digits), entity),
+    )
+    .replace(/&#x([0-9a-f]{1,6});/gi, (entity, hex: string) =>
+      decodeNumericEntity(Number.parseInt(hex, 16), entity),
+    );
+}
+
+function decodeNumericEntity(codePoint: number, entity: string): string {
+  if (
+    !Number.isInteger(codePoint) ||
+    codePoint < 0x20 ||
+    codePoint === 0x7f ||
+    codePoint > 0x10ffff ||
+    (codePoint >= 0xd800 && codePoint <= 0xdfff)
+  ) {
+    return entity;
+  }
+
+  return String.fromCodePoint(codePoint);
 }
 
 function errorMessage(error: unknown): string {
