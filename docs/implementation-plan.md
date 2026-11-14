@@ -85,7 +85,8 @@ PostgreSQL 验证确认相同 Run 可复用，失败节点从 durable checkpoint
 - [x] 增加直接 RSS `run-live` 入口和离线契约测试
 - [x] 接入 36氪、虎嗅、InfoQ RSS 并替换 `run-live` 的合成/MCP Evidence
 - [x] 增加来源级失败审计
-- [ ] 增加更多专业金融与 AI RSS/API 来源
+- [x] 可通过 `RSS_FEED_IDS` 选择内置专业金融与 AI RSS 来源
+- [ ] 增加专业金融与 AI API 来源
 
 完成标准：DeepSeek 对固定 Evidence 生成结构化 Stories，Review 能通过或定向修订；任意未知
 Evidence ID 都被程序拒绝，最终制品的 URL 与输入 Evidence 完全一致，密钥不进入状态或审计数据。

@@ -14,7 +14,7 @@ import { createDeepSeekModelProvider } from "@finance-ai-news-agent/model-ai-sdk
 import { FeishuWebhookOutputPlugin } from "@finance-ai-news-agent/output-feishu";
 import { FileOutputPlugin } from "@finance-ai-news-agent/output-file";
 import type { RunRecord } from "@finance-ai-news-agent/plugin-sdk";
-import { RssNewsGateway, validateRssFeedUrl } from "@finance-ai-news-agent/source-rss";
+import { RssNewsGateway } from "@finance-ai-news-agent/source-rss";
 import {
   PostgresRuntimeStore,
   createPostgresCheckpointer,
@@ -28,6 +28,8 @@ import {
   createDeepSeekModelSnapshot,
   resolveDeepSeekRuntimeConfig,
 } from "./ai-runtime-command.js";
+import { DEFAULT_RSS_FEED_URLS, resolveRssFeedSelection } from "./rss-feed-catalog.js";
+import type { ResolvedRssFeed } from "./rss-feed-catalog.js";
 import {
   parseRunOptions,
   projectRoot,
@@ -35,8 +37,12 @@ import {
   resolvePersistentOutputPath,
 } from "./runtime-command.js";
 
+export type { ResolvedRssFeed };
+export { DEFAULT_RSS_FEED_URLS };
+
 export interface LiveResearchConfig {
   feedUrls: string[];
+  feeds: ResolvedRssFeed[];
   timeoutMs: number;
   maxToolCalls: number;
   maxItemAgeHours: number;
@@ -46,12 +52,6 @@ export interface LiveResearchConfig {
   historyLookbackDays: number;
   storyEventLookbackDays: number;
 }
-
-export const DEFAULT_RSS_FEED_URLS = [
-  "https://36kr.com/feed",
-  "https://rss.huxiu.com/",
-  "https://www.infoq.cn/feed",
-] as const;
 
 export type AgentOutputChannel = "file" | "feishu";
 
@@ -65,9 +65,10 @@ export async function runPersistentAiLive(args: string[]): Promise<void> {
     const checkpointer = await createPostgresCheckpointer(pool);
     const store = new PostgresRuntimeStore(pool);
     const gateway = new RssNewsGateway({
-      feeds: researchConfig.feedUrls.map((url, index) => ({
-        id: `feed-${index + 1}`,
-        url,
+      feeds: researchConfig.feeds.map((feed) => ({
+        id: feed.id,
+        url: feed.url,
+        ...(feed.name === undefined ? {} : { name: feed.name }),
       })),
       timeoutMs: researchConfig.timeoutMs,
       maxItemAgeHours: researchConfig.maxItemAgeHours,
@@ -230,15 +231,13 @@ export function resolveOutputChannel(
 export function resolveLiveResearchConfig(
   environment: Readonly<Record<string, string | undefined>>,
 ): LiveResearchConfig {
-  const feedUrls = (environment.RSS_FEED_URLS?.trim() || DEFAULT_RSS_FEED_URLS.join(","))
-    .split(",")
-    .map((url) => url.trim())
-    .filter((url) => url.length > 0)
-    .map((url) => validateRssFeedUrl(url).toString());
-
-  if (feedUrls.length === 0 || feedUrls.length > 16 || new Set(feedUrls).size !== feedUrls.length) {
-    throw new Error("RSS_FEED_URLS must contain 1 to 16 unique comma-separated feed URLs.");
-  }
+  const feeds = resolveRssFeedSelection({
+    feedIds: environment.RSS_FEED_IDS,
+    feedTopics: environment.RSS_FEED_TOPICS,
+    feedUrls: environment.RSS_FEED_URLS,
+    fallbackUrls: DEFAULT_RSS_FEED_URLS,
+  });
+  const feedUrls = feeds.map((feed) => feed.url);
 
   const timeoutText = environment.RSS_TIMEOUT_MS?.trim() || "5000";
   const timeoutMs = Number(timeoutText);
@@ -303,6 +302,7 @@ export function resolveLiveResearchConfig(
 
   return {
     feedUrls,
+    feeds,
     timeoutMs,
     maxToolCalls,
     maxItemAgeHours,

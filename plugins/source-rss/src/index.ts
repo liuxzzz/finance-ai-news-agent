@@ -12,6 +12,20 @@ import type {
 import Parser from "rss-parser";
 import { z } from "zod";
 
+const TRACKING_PARAMETERS = new Set([
+  "f",
+  "from",
+  "ref",
+  "rss",
+  "source",
+  "spm",
+  "utm_campaign",
+  "utm_content",
+  "utm_medium",
+  "utm_source",
+  "utm_term",
+]);
+const FUTURE_ITEM_SKEW_MS = 3 * 60 * 60 * 1_000;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_CACHE_TTL_MS = 60_000;
 const DEFAULT_MAX_ITEM_AGE_HOURS = 48;
@@ -246,7 +260,15 @@ export class RssNewsGateway implements ToolGateway {
           const feed = await this.parseFeed(configuredFeed.url);
           const source = configuredFeed.name ?? cleanText(feed.title ?? "") ?? configuredFeed.id;
           const normalized = feed.items
-            .map((item) => normalizeItem(item, configuredFeed.id, source, this.maxExcerptChars))
+            .map((item) =>
+              normalizeItem(
+                item,
+                configuredFeed.id,
+                source,
+                configuredFeed.url,
+                this.maxExcerptChars,
+              ),
+            )
             .filter((item): item is LoadedRssItem => item !== null);
           const finishedAt = new Date(this.now()).toISOString();
 
@@ -278,7 +300,12 @@ export class RssNewsGateway implements ToolGateway {
             });
           }
 
-          return normalized.filter((item) => item.publishedTime >= this.now() - this.maxItemAgeMs);
+          const now = this.now();
+          const earliest = now - this.maxItemAgeMs;
+          const latest = now + FUTURE_ITEM_SKEW_MS;
+          return normalized.filter(
+            (item) => item.publishedTime >= earliest && item.publishedTime <= latest,
+          );
         } catch (error) {
           if (this.sourceAudit !== undefined && runId !== undefined) {
             await this.sourceAudit.recordSourceCollection({
@@ -355,28 +382,13 @@ function normalizeItem(
   item: ParsedRssItem,
   sourceId: string,
   source: string,
+  feedUrl: string,
   maxExcerptChars: number,
 ): LoadedRssItem | null {
   const title = cleanText(item.title ?? "");
-  const link = item.link?.trim();
+  const url = articleUrl(item, feedUrl);
 
-  if (title === null || link === undefined || link.length === 0) {
-    return null;
-  }
-
-  let url: URL;
-
-  try {
-    url = new URL(link);
-  } catch {
-    return null;
-  }
-
-  if (
-    (url.protocol !== "https:" && url.protocol !== "http:") ||
-    url.username.length > 0 ||
-    url.password.length > 0
-  ) {
+  if (title === null || url === null) {
     return null;
   }
 
@@ -404,6 +416,56 @@ function normalizeItem(
     contentHash,
     raw,
   };
+}
+
+function articleUrl(item: ParsedRssItem, feedUrl: string): URL | null {
+  const link = item.link?.trim();
+
+  if (link !== undefined && link.length > 0) {
+    const resolved = safeHttpUrl(link, feedUrl);
+
+    if (resolved !== null) {
+      return canonicalizeArticleUrl(resolved);
+    }
+  }
+
+  const guid = item.guid?.trim();
+  const guidUrl = guid === undefined || guid.length === 0 ? null : safeHttpUrl(guid);
+  return guidUrl === null ? null : canonicalizeArticleUrl(guidUrl);
+}
+
+function canonicalizeArticleUrl(url: URL): URL {
+  const canonical = new URL(url.toString());
+  canonical.hash = "";
+
+  for (const name of [...canonical.searchParams.keys()]) {
+    const normalized = name.toLocaleLowerCase("en-US");
+
+    if (TRACKING_PARAMETERS.has(normalized) || normalized.startsWith("utm_")) {
+      canonical.searchParams.delete(name);
+    }
+  }
+
+  canonical.searchParams.sort();
+  return canonical;
+}
+
+function safeHttpUrl(value: string, baseUrl?: string): URL | null {
+  try {
+    const url = baseUrl === undefined ? new URL(value) : new URL(value, baseUrl);
+
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username.length > 0 ||
+      url.password.length > 0
+    ) {
+      return null;
+    }
+
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 function selectLatestRelevantItems(
@@ -523,17 +585,40 @@ function serializeError(error: unknown) {
 }
 
 function cleanText(value: string): string | null {
-  const normalized = value
-    .replace(/<[^>]*>/g, " ")
+  const normalized = decodeHtmlEntities(value.replace(/<[^>]*>/g, " "))
+    .replace(/\s+/g, " ")
+    .trim();
+  return normalized.length === 0 ? null : normalized;
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value
     .replace(/&nbsp;/gi, " ")
     .replace(/&amp;/gi, "&")
     .replace(/&lt;/gi, "<")
     .replace(/&gt;/gi, ">")
     .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/\s+/g, " ")
-    .trim();
-  return normalized.length === 0 ? null : normalized;
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&#(\d{1,7});/g, (entity, digits: string) =>
+      decodeNumericEntity(Number(digits), entity),
+    )
+    .replace(/&#x([0-9a-f]{1,6});/gi, (entity, hex: string) =>
+      decodeNumericEntity(Number.parseInt(hex, 16), entity),
+    );
+}
+
+function decodeNumericEntity(codePoint: number, entity: string): string {
+  if (
+    !Number.isInteger(codePoint) ||
+    codePoint < 0x20 ||
+    codePoint === 0x7f ||
+    codePoint > 0x10ffff ||
+    (codePoint >= 0xd800 && codePoint <= 0xdfff)
+  ) {
+    return entity;
+  }
+
+  return String.fromCodePoint(codePoint);
 }
 
 function errorMessage(error: unknown): string {

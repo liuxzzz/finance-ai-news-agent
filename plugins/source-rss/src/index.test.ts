@@ -251,6 +251,168 @@ describe("RSS news gateway", () => {
       ]),
     );
   });
+
+  it("resolves relative article links and falls back to absolute permalink guids", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "36kr", name: "36氪", url: "https://36kr.com/feed" }],
+      now: () => Date.parse("2026-08-04T12:00:00.000Z"),
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "相对链接稿件",
+            link: "/p/relative-ai",
+            isoDate: "2026-08-04T09:00:00.000Z",
+          },
+          {
+            title: "协议相对稿件",
+            link: "//cdn.36kr.com/p/protocol",
+            isoDate: "2026-08-04T08:00:00.000Z",
+          },
+          {
+            title: "只有永久链接",
+            guid: "https://36kr.com/p/guid-only",
+            isoDate: "2026-08-04T07:00:00.000Z",
+          },
+          {
+            title: "危险链接被忽略",
+            link: "javascript:alert(1)",
+            guid: "opaque-guid",
+            isoDate: "2026-08-04T06:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool({
+      id: "links",
+      name: "search_news",
+      arguments: { query: "unmatched", limit: 10 },
+    });
+    const items = (result.content as { items: Array<{ title: string; url: string }> }).items;
+
+    expect(items.map((item) => item.url)).toEqual([
+      "https://36kr.com/p/relative-ai",
+      "https://cdn.36kr.com/p/protocol",
+      "https://36kr.com/p/guid-only",
+    ]);
+    expect(items.map((item) => item.title)).not.toContain("危险链接被忽略");
+  });
+
+  it("decodes numeric HTML entities before ranking and model use", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "sec-press", name: "SEC", url: "https://www.sec.gov/news/pressreleases.rss" }],
+      now: () => Date.parse("2026-08-04T12:00:00.000Z"),
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "&#20013;&#x6587; &#65;I &#39;芯片&#39;",
+            link: "https://www.sec.gov/news/press-release/ai",
+            isoDate: "2026-08-04T09:00:00.000Z",
+            contentSnippet: "增长 &gt; 10&#160;%",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool({
+      id: "entities",
+      name: "search_news",
+      arguments: { query: "中文", limit: 1 },
+    });
+
+    expect(result.content).toEqual({
+      items: [
+        expect.objectContaining({
+          title: "中文 AI '芯片'",
+          excerpt: "增长 > 10 %",
+        }),
+      ],
+    });
+  });
+
+  it("collapses tracking parameters and fragments before ranking", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "sec-press", url: "https://www.sec.gov/news/pressreleases.rss" }],
+      now: () => Date.parse("2026-08-04T12:00:00.000Z"),
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "AI rule older copy",
+            link: "https://www.sec.gov/news/press-release/ai-rule?utm_source=rss&id=7#body",
+            isoDate: "2026-08-04T08:00:00.000Z",
+          },
+          {
+            title: "AI rule latest copy",
+            link: "https://www.sec.gov/news/press-release/ai-rule?id=7&utm_medium=feed",
+            isoDate: "2026-08-04T10:00:00.000Z",
+          },
+          {
+            title: "Separate filing",
+            link: "https://www.sec.gov/news/press-release/other?ref=rss",
+            isoDate: "2026-08-04T09:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool({
+      id: "tracked",
+      name: "search_news",
+      arguments: { query: "unmatched", limit: 5 },
+    });
+    const items = (result.content as { items: Array<{ title: string; url: string }> }).items;
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        title: "AI rule latest copy",
+        url: "https://www.sec.gov/news/press-release/ai-rule?id=7",
+      }),
+      expect.objectContaining({
+        title: "Separate filing",
+        url: "https://www.sec.gov/news/press-release/other",
+      }),
+    ]);
+  });
+
+  it("drops items dated beyond the allowed clock skew", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "sec-press", url: "https://www.sec.gov/news/pressreleases.rss" }],
+      now: () => Date.parse("2026-08-04T12:00:00.000Z"),
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "Current filing",
+            link: "https://www.sec.gov/news/press-release/current",
+            isoDate: "2026-08-04T11:00:00.000Z",
+          },
+          {
+            title: "Slightly ahead filing",
+            link: "https://www.sec.gov/news/press-release/ahead",
+            isoDate: "2026-08-04T14:00:00.000Z",
+          },
+          {
+            title: "Tomorrow filing",
+            link: "https://www.sec.gov/news/press-release/tomorrow",
+            isoDate: "2026-08-05T12:00:00.000Z",
+          },
+          {
+            title: "Far future filing",
+            link: "https://www.sec.gov/news/press-release/future",
+            isoDate: "2099-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool({
+      id: "future",
+      name: "search_news",
+      arguments: { query: "filing", limit: 10 },
+    });
+    const items = (result.content as { items: Array<{ title: string }> }).items;
+
+    expect(items.map((item) => item.title)).toEqual(["Slightly ahead filing", "Current filing"]);
+  });
 });
 
 class RecordingSourceAudit implements SourceAuditStore {
