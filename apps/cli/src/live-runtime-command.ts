@@ -233,6 +233,7 @@ export function resolveLiveResearchConfig(
 ): LiveResearchConfig {
   const feeds = resolveRssFeedSelection({
     feedIds: environment.RSS_FEED_IDS,
+    feedTopics: environment.RSS_FEED_TOPICS,
     feedUrls: environment.RSS_FEED_URLS,
     fallbackUrls: DEFAULT_RSS_FEED_URLS,
   });

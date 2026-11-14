@@ -82,13 +82,21 @@ export interface ResolvedRssFeed {
   topic?: RssFeedTopic;
 }
 
+const RSS_FEED_TOPICS = ["finance", "ai", "general"] as const;
+
 export function resolveRssFeedSelection(input: {
   feedIds: string | undefined;
+  feedTopics?: string | undefined;
   feedUrls: string | undefined;
   fallbackUrls: readonly string[];
 }): ResolvedRssFeed[] {
+  const requestedTopics = splitConfigList(input.feedTopics);
   const requestedIds = splitConfigList(input.feedIds);
   const explicitUrls = splitConfigList(input.feedUrls);
+
+  if (requestedTopics !== undefined && requestedTopics.length === 0) {
+    throw new Error("RSS_FEED_TOPICS must contain at least one topic.");
+  }
 
   if (requestedIds !== undefined && requestedIds.length === 0) {
     throw new Error("RSS_FEED_IDS must contain at least one catalog id.");
@@ -98,16 +106,50 @@ export function resolveRssFeedSelection(input: {
     throw new Error(URL_LIST_ERROR);
   }
 
-  const requestedUrls = explicitUrls ?? (requestedIds === undefined ? [...input.fallbackUrls] : []);
+  const requestedUrls =
+    explicitUrls ??
+    (requestedTopics === undefined && requestedIds === undefined ? [...input.fallbackUrls] : []);
   const catalogById = new Map(FINANCE_AI_RSS_CATALOG.map((feed) => [feed.id, feed]));
   const selected: ResolvedRssFeed[] = [];
   const seenIds = new Set<string>();
   const seenUrls = new Set<string>();
 
+  if (requestedTopics !== undefined) {
+    const seenTopics = new Set<string>();
+
+    for (const topic of requestedTopics) {
+      if (seenTopics.has(topic)) {
+        throw new Error(`Duplicate RSS feed topic: ${topic}.`);
+      }
+
+      seenTopics.add(topic);
+
+      if (!isRssFeedTopic(topic)) {
+        throw new Error(
+          `Unknown RSS feed topic: ${topic}. Known topics: ${RSS_FEED_TOPICS.join(", ")}.`,
+        );
+      }
+
+      for (const feed of FINANCE_AI_RSS_CATALOG) {
+        if (feed.topic === topic) {
+          addCatalogFeed(selected, seenIds, seenUrls, feed);
+        }
+      }
+    }
+  }
+
   if (requestedIds !== undefined) {
+    const explicitIds = new Set<string>();
+
     for (const id of requestedIds) {
-      if (seenIds.has(id)) {
+      if (explicitIds.has(id)) {
         throw new Error(`Duplicate RSS feed id: ${id}.`);
+      }
+
+      explicitIds.add(id);
+
+      if (seenIds.has(id)) {
+        continue;
       }
 
       const feed = catalogById.get(id);
@@ -118,12 +160,7 @@ export function resolveRssFeedSelection(input: {
         );
       }
 
-      addFeed(selected, seenIds, seenUrls, {
-        id: feed.id,
-        name: feed.name,
-        url: validateRssFeedUrl(feed.url).toString(),
-        topic: feed.topic,
-      });
+      addCatalogFeed(selected, seenIds, seenUrls, feed);
     }
   }
 
@@ -152,13 +189,31 @@ export function resolveRssFeedSelection(input: {
 
   if (selected.length === 0 || selected.length > MAX_RSS_FEEDS) {
     throw new Error(
-      requestedIds === undefined
+      requestedTopics === undefined && requestedIds === undefined
         ? URL_LIST_ERROR
         : "RSS feeds must contain 1 to 16 unique entries.",
     );
   }
 
   return selected;
+}
+
+function addCatalogFeed(
+  selected: ResolvedRssFeed[],
+  seenIds: Set<string>,
+  seenUrls: Set<string>,
+  feed: RssCatalogFeed,
+): void {
+  addFeed(selected, seenIds, seenUrls, {
+    id: feed.id,
+    name: feed.name,
+    url: validateRssFeedUrl(feed.url).toString(),
+    topic: feed.topic,
+  });
+}
+
+function isRssFeedTopic(value: string): value is RssFeedTopic {
+  return (RSS_FEED_TOPICS as readonly string[]).includes(value);
 }
 
 function addFeed(

@@ -112,6 +112,69 @@ describe("finance and AI RSS catalog", () => {
     ]);
   });
 
+  it("selects catalog groups by topic and keeps unset topics on the defaults", () => {
+    expect(
+      resolveRssFeedSelection({
+        feedTopics: " ai, finance ",
+        feedIds: "sec-press,36kr",
+        feedUrls: "https://example.com/extra.xml",
+        fallbackUrls: DEFAULT_RSS_FEED_URLS,
+      }).map((feed) => feed.id),
+    ).toEqual([
+      "openai-news",
+      "google-ai",
+      "deepmind",
+      "huggingface-blog",
+      "qbitai",
+      "sec-press",
+      "federal-reserve",
+      "ecb-press",
+      "wallstreetcn",
+      "36kr",
+      "feed-1",
+    ]);
+
+    expect(
+      resolveRssFeedSelection({
+        feedTopics: "   ",
+        feedIds: undefined,
+        feedUrls: undefined,
+        fallbackUrls: DEFAULT_RSS_FEED_URLS,
+      }),
+    ).toEqual([
+      { id: "feed-1", url: "https://36kr.com/feed" },
+      { id: "feed-2", url: "https://rss.huxiu.com/" },
+      { id: "feed-3", url: "https://www.infoq.cn/feed" },
+    ]);
+
+    expect(() =>
+      resolveRssFeedSelection({
+        feedTopics: "markets",
+        feedIds: undefined,
+        feedUrls: undefined,
+        fallbackUrls: DEFAULT_RSS_FEED_URLS,
+      }),
+    ).toThrow("Unknown RSS feed topic: markets. Known topics: finance, ai, general.");
+
+    expect(() =>
+      resolveRssFeedSelection({
+        feedTopics: "finance,finance",
+        feedIds: undefined,
+        feedUrls: undefined,
+        fallbackUrls: DEFAULT_RSS_FEED_URLS,
+      }),
+    ).toThrow("Duplicate RSS feed topic: finance.");
+
+    expect(() =>
+      resolveRssFeedSelection({
+        feedTopics: ",",
+        feedIds: undefined,
+        feedUrls: undefined,
+        fallbackUrls: DEFAULT_RSS_FEED_URLS,
+      }),
+    ).toThrow("RSS_FEED_TOPICS must contain at least one topic.");
+  });
+
   it("rejects unknown ids, duplicate ids, duplicate URLs, unsafe URLs, and more than 16 feeds", () => {
     expect(() =>
       resolveRssFeedSelection({

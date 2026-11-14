@@ -85,6 +85,20 @@ describe("live RSS research configuration", () => {
     ).toThrow("integer from 12 to 24");
   });
 
+  it("selects the finance catalog when RSS_FEED_TOPICS is finance", () => {
+    const config = resolveLiveResearchConfig({
+      RSS_FEED_TOPICS: "finance",
+    });
+
+    expect(config.feeds.map((feed) => feed.id)).toEqual([
+      "sec-press",
+      "federal-reserve",
+      "ecb-press",
+      "wallstreetcn",
+    ]);
+    expect(config.feedUrls).toEqual(config.feeds.map((feed) => feed.url));
+  });
+
   it("uses catalog ids and names when RSS_FEED_IDS is set", () => {
     expect(
       resolveLiveResearchConfig({

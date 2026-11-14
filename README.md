@@ -117,9 +117,9 @@ Evidence 的 ID，最终 Markdown 中的来源 URL 由程序从 Evidence 确定�
 
 `run-live` 使用 DeepSeek Function Calling 选择内部只读 `search_news` 工具。工具直接读取配置的
 RSS Feed，按关键词相关度与发布时间选取新闻，再转换成受 Schema 保护的 Evidence；不需要 MCP
-Server。未设置 `RSS_FEED_IDS` 时，默认 Feed 是 36氪、虎嗅和 InfoQ。设置 `RSS_FEED_IDS`
-后，采集列表就是这些内置目录项；若同时提供 `RSS_FEED_URLS`，目录项在前，尚未出现的自定义
-URL 接在后面。目录只做离线配置校验，拉取仍由运行时逐个 Feed 执行，单个来源失败不会阻断其他来源。
+Server。未设置 `RSS_FEED_TOPICS` 和 `RSS_FEED_IDS` 时，默认 Feed 是 36氪、虎嗅和 InfoQ。
+`RSS_FEED_TOPICS` 可取 `finance`、`ai`、`general`，按书写顺序展开目录；`RSS_FEED_IDS`
+再追加尚未选中的目录项。若同时提供 `RSS_FEED_URLS`，尚未出现的自定义 URL 接在后面。目录只做离线配置校验，拉取仍由运行时逐个 Feed 执行，单个来源失败不会阻断其他来源。
 
 | ID                 | 主题 | 来源                 |
 | ------------------ | ---- | -------------------- |
@@ -138,6 +138,7 @@ URL 接在后面。目录只做离线配置校验，拉取仍由运行时逐个 
 
 ```bash
 # 可在被 Git 忽略的 .env.local 中覆盖；多个值使用英文逗号分隔
+# RSS_FEED_TOPICS=finance,ai
 # RSS_FEED_IDS=sec-press,federal-reserve,ecb-press,wallstreetcn,openai-news,google-ai,deepmind,qbitai
 RSS_FEED_URLS=https://36kr.com/feed,https://rss.huxiu.com/,https://www.infoq.cn/feed
 RSS_TIMEOUT_MS=5000
