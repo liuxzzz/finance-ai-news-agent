@@ -373,6 +373,46 @@ describe("RSS news gateway", () => {
       }),
     ]);
   });
+
+  it("drops items dated beyond the allowed clock skew", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "sec-press", url: "https://www.sec.gov/news/pressreleases.rss" }],
+      now: () => Date.parse("2026-08-04T12:00:00.000Z"),
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "Current filing",
+            link: "https://www.sec.gov/news/press-release/current",
+            isoDate: "2026-08-04T11:00:00.000Z",
+          },
+          {
+            title: "Slightly ahead filing",
+            link: "https://www.sec.gov/news/press-release/ahead",
+            isoDate: "2026-08-04T14:00:00.000Z",
+          },
+          {
+            title: "Tomorrow filing",
+            link: "https://www.sec.gov/news/press-release/tomorrow",
+            isoDate: "2026-08-05T12:00:00.000Z",
+          },
+          {
+            title: "Far future filing",
+            link: "https://www.sec.gov/news/press-release/future",
+            isoDate: "2099-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool({
+      id: "future",
+      name: "search_news",
+      arguments: { query: "filing", limit: 10 },
+    });
+    const items = (result.content as { items: Array<{ title: string }> }).items;
+
+    expect(items.map((item) => item.title)).toEqual(["Slightly ahead filing", "Current filing"]);
+  });
 });
 
 class RecordingSourceAudit implements SourceAuditStore {

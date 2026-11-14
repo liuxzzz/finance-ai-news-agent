@@ -25,6 +25,7 @@ const TRACKING_PARAMETERS = new Set([
   "utm_source",
   "utm_term",
 ]);
+const FUTURE_ITEM_SKEW_MS = 3 * 60 * 60 * 1_000;
 const DEFAULT_TIMEOUT_MS = 5_000;
 const DEFAULT_CACHE_TTL_MS = 60_000;
 const DEFAULT_MAX_ITEM_AGE_HOURS = 48;
@@ -299,7 +300,12 @@ export class RssNewsGateway implements ToolGateway {
             });
           }
 
-          return normalized.filter((item) => item.publishedTime >= this.now() - this.maxItemAgeMs);
+          const now = this.now();
+          const earliest = now - this.maxItemAgeMs;
+          const latest = now + FUTURE_ITEM_SKEW_MS;
+          return normalized.filter(
+            (item) => item.publishedTime >= earliest && item.publishedTime <= latest,
+          );
         } catch (error) {
           if (this.sourceAudit !== undefined && runId !== undefined) {
             await this.sourceAudit.recordSourceCollection({
