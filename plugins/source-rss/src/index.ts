@@ -27,11 +27,34 @@ const TRACKING_PARAMETERS = new Set([
 ]);
 const FUTURE_ITEM_SKEW_MS = 3 * 60 * 60 * 1_000;
 const DEFAULT_TIMEOUT_MS = 5_000;
+const DEFAULT_FEED_RETRY_DELAY_MS = 400;
 const DEFAULT_CACHE_TTL_MS = 60_000;
 const DEFAULT_MAX_ITEM_AGE_HOURS = 48;
 const DEFAULT_MAX_EXCERPT_CHARS = 600;
 const MAX_FEEDS = 16;
 const MAX_RESULTS = 24;
+const RSS_USER_AGENT = "finance-ai-news-agent (+https://github.com/liuxzzz/finance-ai-news-agent)";
+const TRANSIENT_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+const TRANSIENT_NETWORK_CODES = new Set([
+  "EAI_AGAIN",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EPIPE",
+  "ETIMEDOUT",
+  "UND_ERR_BODY_TIMEOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+const HTTP_STATUS_IN_MESSAGE = /(?:\bstatus(?:\s+code)?|\bHTTP\/1\.[01])[:\s]+(\d{3})\b/i;
+const TRANSIENT_CODE_IN_MESSAGE =
+  /\b(?:EAI_AGAIN|ECONNABORTED|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EPIPE|ETIMEDOUT|UND_ERR_BODY_TIMEOUT|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_SOCKET)\b/;
+const OBVIOUS_FEED_PARSE_ERROR =
+  /unable to parse xml|feed not recognized as rss|default rss version not recognized|non-whitespace before first tag|invalid character|unexpected close tag|unclosed (?:root|xml)|no root element|attribute without value/i;
 
 export interface RssFeedConfig {
   id: string;
@@ -64,6 +87,8 @@ export interface RssNewsGatewayOptions {
   minimumResultCount?: number;
   now?: () => number;
   parseFeed?: (url: string) => Promise<ParsedRssFeed>;
+  retryDelayMs?: number;
+  sleep?: (delayMs: number) => Promise<void>;
   sourceAudit?: SourceAuditStore;
   generateId?: () => string;
 }
@@ -114,6 +139,8 @@ export class RssNewsGateway implements ToolGateway {
   private readonly maxExcerptChars: number;
   private readonly minimumResultCount: number;
   private readonly now: () => number;
+  private readonly retryDelayMs: number;
+  private readonly sleep: (delayMs: number) => Promise<void>;
   private readonly parseFeed: (url: string) => Promise<ParsedRssFeed>;
   private readonly sourceAudit: SourceAuditStore | undefined;
   private readonly generateId: () => string;
@@ -161,6 +188,11 @@ export class RssNewsGateway implements ToolGateway {
       MAX_RESULTS,
     );
     this.now = options.now ?? Date.now;
+    this.retryDelayMs = nonnegativeInteger(
+      options.retryDelayMs ?? DEFAULT_FEED_RETRY_DELAY_MS,
+      "retryDelayMs",
+    );
+    this.sleep = options.sleep ?? defaultSleep;
     this.sourceAudit = options.sourceAudit;
     this.generateId = options.generateId ?? randomUUID;
 
@@ -168,6 +200,7 @@ export class RssNewsGateway implements ToolGateway {
       this.parseFeed = options.parseFeed;
     } else {
       const parser = new Parser({
+        headers: { "User-Agent": RSS_USER_AGENT },
         timeout: positiveInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, "timeoutMs"),
       });
       this.parseFeed = async (url) => parser.parseURL(url);
@@ -257,7 +290,7 @@ export class RssNewsGateway implements ToolGateway {
         const startedAt = new Date(this.now()).toISOString();
 
         try {
-          const feed = await this.parseFeed(configuredFeed.url);
+          const feed = await this.parseFeedWithRetry(configuredFeed.url);
           const source = configuredFeed.name ?? cleanText(feed.title ?? "") ?? configuredFeed.id;
           const normalized = feed.items
             .map((item) =>
@@ -352,6 +385,23 @@ export class RssNewsGateway implements ToolGateway {
     }
 
     return [...byUrl.values()].sort((left, right) => right.publishedTime - left.publishedTime);
+  }
+
+  /**
+   * One extra attempt for a transient fetch. Audit stays outside this method,
+   * so a success after retry records a single succeeded row.
+   */
+  private async parseFeedWithRetry(url: string): Promise<ParsedRssFeed> {
+    try {
+      return await this.parseFeed(url);
+    } catch (error) {
+      if (!isTransientFeedError(error)) {
+        throw error;
+      }
+
+      await this.sleep(this.retryDelayMs);
+      return this.parseFeed(url);
+    }
   }
 }
 
@@ -619,6 +669,142 @@ function decodeNumericEntity(codePoint: number, entity: string): string {
   }
 
   return String.fromCodePoint(codePoint);
+}
+
+function defaultSleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
+}
+
+/**
+ * rss-parser 3.13 `parseURL` rejects HTTP failures as `Error` with message
+ * `Status code <n>` and no status field. Timeouts use
+ * `Request timed out after <ms>ms`. Socket failures reject the Node error,
+ * whose `code` is ECONNRESET, ETIMEDOUT, ECONNREFUSED, ENOTFOUND, and similar.
+ * XML parsing runs only after the response ends, so those parser messages are
+ * not treated as truncated transfers.
+ */
+function isTransientFeedError(error: unknown): boolean {
+  const status = httpStatus(error);
+
+  if (status !== undefined) {
+    return TRANSIENT_HTTP_STATUSES.has(status);
+  }
+
+  return hasTransientNetworkSignal(error, 0);
+}
+
+function httpStatus(error: unknown, depth = 0): number | undefined {
+  if (depth > 4 || !isRecord(error)) {
+    return undefined;
+  }
+
+  const direct = numericStatus(error.status) ?? numericStatus(error.statusCode);
+
+  if (direct !== undefined) {
+    return direct;
+  }
+
+  if (isRecord(error.response)) {
+    const responseStatus =
+      numericStatus(error.response.status) ?? numericStatus(error.response.statusCode);
+
+    if (responseStatus !== undefined) {
+      return responseStatus;
+    }
+  }
+
+  const message = readString(error.message);
+
+  if (message !== undefined) {
+    const match = message.match(HTTP_STATUS_IN_MESSAGE);
+
+    if (match?.[1] !== undefined) {
+      return Number(match[1]);
+    }
+  }
+
+  return httpStatus(error.cause, depth + 1);
+}
+
+function hasTransientNetworkSignal(error: unknown, depth: number): boolean {
+  if (depth > 4) {
+    return false;
+  }
+
+  if (typeof error === "string") {
+    return !OBVIOUS_FEED_PARSE_ERROR.test(error) && messageIsTransient(error, "");
+  }
+
+  if (!isRecord(error)) {
+    return false;
+  }
+
+  const name = readString(error.name) ?? "";
+  const message = readString(error.message) ?? "";
+  const code = readString(error.code);
+
+  if (code !== undefined && TRANSIENT_NETWORK_CODES.has(code)) {
+    return true;
+  }
+
+  if (name === "AbortError" || name === "TimeoutError") {
+    return true;
+  }
+
+  if (OBVIOUS_FEED_PARSE_ERROR.test(message)) {
+    return false;
+  }
+
+  if (messageIsTransient(message, name)) {
+    return true;
+  }
+
+  if (hasTransientNetworkSignal(error.cause, depth + 1)) {
+    return true;
+  }
+
+  return (
+    Array.isArray(error.errors) &&
+    error.errors.some((item) => hasTransientNetworkSignal(item, depth + 1))
+  );
+}
+
+function messageIsTransient(message: string, name: string): boolean {
+  if (
+    name === "TypeError" &&
+    /fetch failed|failed to fetch|networkerror|network error|network failure|network request failed/i.test(
+      message,
+    )
+  ) {
+    return true;
+  }
+
+  return (
+    /timed out/i.test(message) ||
+    /\btimeout\b/i.test(message) ||
+    /socket hang up/i.test(message) ||
+    /the operation was aborted/i.test(message) ||
+    /\brequest aborted\b/i.test(message) ||
+    TRANSIENT_CODE_IN_MESSAGE.test(message)
+  );
+}
+
+function numericStatus(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value) && value >= 100 && value <= 599) {
+    return value;
+  }
+
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
 }
 
 function errorMessage(error: unknown): string {

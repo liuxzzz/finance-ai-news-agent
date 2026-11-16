@@ -155,8 +155,9 @@ pnpm run:live -- --report-date 2026-08-04 --edition daily --dry-run
 ```
 
 Feed 必须使用 HTTPS，本地 loopback 测试可以使用 HTTP。模型只能传入 `query` 与 `limit`，不能
-指定任意 URL。每个来源的成功、失败和原始条目分别写入 `source_runs` 与 `raw_source_items`；候选
-内容会清理追踪参数、生成内容指纹、跨源聚类，并与最近 7 天成功 Run 比较后再均衡选取。审核通过的
+指定任意 URL。每个来源的成功、失败和原始条目分别写入 `source_runs` 与 `raw_source_items`。
+超时、连接中断以及 HTTP 429/502/503/504 会在短延迟后重试该 Feed 一次，审计只记录最终结果。
+候选内容会清理追踪参数、生成内容指纹、跨源聚类，并与最近 7 天成功 Run 比较后再均衡选取。审核通过的
 stories 会在独立的可恢复阶段与最近 30 天事件匹配，形成首次出现、最近更新和更新次数时间线。RSS
 条目会被转换成以下结构后才可进入 Agent Evidence：
 

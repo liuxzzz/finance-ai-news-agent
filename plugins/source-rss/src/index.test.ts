@@ -8,6 +8,91 @@ import { describe, expect, it } from "vitest";
 
 import { RssNewsGateway, validateRssFeedUrl } from "./index.js";
 
+const FEED_NOW = Date.parse("2026-08-04T12:00:00.000Z");
+
+// Shapes produced by rss-parser 3.13, Node sockets, and fetch. See the retry
+// tests below for which of these are transient.
+const TRANSIENT_FEED_FAILURES = [
+  { label: "HTTP 429", failure: new Error("Status code 429") },
+  { label: "HTTP 502", failure: new Error("Status code 502") },
+  { label: "HTTP 503", failure: new Error("Status code 503") },
+  { label: "HTTP 504", failure: new Error("Status code 504") },
+  {
+    label: "status property 429",
+    failure: Object.assign(new Error("rate limited"), { status: 429 }),
+  },
+  { label: "rss-parser timeout", failure: new Error("Request timed out after 5000ms") },
+  { label: "ECONNRESET", failure: withCode("read ECONNRESET", "ECONNRESET") },
+  { label: "ETIMEDOUT", failure: withCode("connect ETIMEDOUT 203.0.113.8:443", "ETIMEDOUT") },
+  {
+    label: "ECONNREFUSED",
+    failure: withCode("connect ECONNREFUSED 203.0.113.8:443", "ECONNREFUSED"),
+  },
+  { label: "ENOTFOUND", failure: withCode("getaddrinfo ENOTFOUND flaky.example", "ENOTFOUND") },
+  { label: "EAI_AGAIN", failure: withCode("getaddrinfo EAI_AGAIN flaky.example", "EAI_AGAIN") },
+  { label: "ECONNABORTED", failure: withCode("connection aborted", "ECONNABORTED") },
+  { label: "ENETUNREACH", failure: withCode("network unreachable", "ENETUNREACH") },
+  { label: "EHOSTUNREACH", failure: withCode("host unreachable", "EHOSTUNREACH") },
+  { label: "EPIPE", failure: withCode("broken pipe", "EPIPE") },
+  {
+    label: "UND_ERR_CONNECT_TIMEOUT",
+    failure: withCode("undici failure", "UND_ERR_CONNECT_TIMEOUT"),
+  },
+  {
+    label: "UND_ERR_HEADERS_TIMEOUT",
+    failure: withCode("undici failure", "UND_ERR_HEADERS_TIMEOUT"),
+  },
+  { label: "UND_ERR_BODY_TIMEOUT", failure: withCode("undici failure", "UND_ERR_BODY_TIMEOUT") },
+  { label: "UND_ERR_SOCKET", failure: withCode("undici failure", "UND_ERR_SOCKET") },
+  { label: "ECONNRESET message only", failure: new Error("read ECONNRESET") },
+  { label: "socket hang up", failure: new Error("socket hang up") },
+  {
+    label: "response status 503",
+    failure: Object.assign(new Error("upstream unavailable"), { response: { status: 503 } }),
+  },
+  { label: "AbortError", failure: namedError("AbortError", "The operation was aborted") },
+  {
+    label: "TimeoutError",
+    failure: namedError("TimeoutError", "The operation was aborted due to timeout"),
+  },
+  { label: "fetch TypeError", failure: new TypeError("fetch failed") },
+  {
+    label: "fetch cause ECONNREFUSED",
+    failure: Object.assign(new Error("fetch failed"), {
+      cause: withCode("connect ECONNREFUSED 127.0.0.1:443", "ECONNREFUSED"),
+    }),
+  },
+];
+
+const NON_TRANSIENT_FEED_FAILURES = [
+  { label: "HTTP 404", failure: new Error("Status code 404") },
+  { label: "HTTP 400", failure: new Error("Status code 400") },
+  { label: "HTTP 500", failure: new Error("Status code 500") },
+  { label: "status property 404", failure: Object.assign(new Error("missing"), { status: 404 }) },
+  { label: "redirect cap", failure: new Error("Too many redirects") },
+  { label: "empty XML", failure: new Error("Unable to parse XML.") },
+  { label: "unrecognized feed", failure: new Error("Feed not recognized as RSS 1 or 2.") },
+  {
+    label: "xml2js syntax error",
+    failure: new Error("Non-whitespace before first tag.\nLine: 0\nColumn: 1\nChar: <"),
+  },
+  {
+    label: "xml2js close tag",
+    failure: new Error("Unexpected close tag\nLine: 2\nColumn: 3\nChar: >"),
+  },
+  { label: "application error", failure: new Error("feed unavailable") },
+];
+
+function withCode(message: string, code: string): Error {
+  return Object.assign(new Error(message), { code });
+}
+
+function namedError(name: string, message: string): Error {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
 describe("RSS news gateway", () => {
   it("fetches configured feeds, ranks matching items, and returns normalized evidence", async () => {
     let requests = 0;
@@ -413,6 +498,294 @@ describe("RSS news gateway", () => {
 
     expect(items.map((item) => item.title)).toEqual(["Slightly ahead filing", "Current filing"]);
   });
+
+  // rss-parser 3.13 parseURL does not set status or statusCode. HTTP failures
+  // are `Error` messages `Status code <n>` (retry only 429/502/503/504; other
+  // statuses, including 4xx and 500, are final). Timeouts are
+  // `Request timed out after <ms>ms`. Socket failures reject the Node error
+  // (`ECONNRESET`, `ETIMEDOUT`, `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`,
+  // `ECONNABORTED`, `ENETUNREACH`, `EHOSTUNREACH`, `EPIPE`, and undici
+  // `UND_ERR_*` timeout/socket codes), matched from `code` or the message, or
+  // an AbortError / TimeoutError / fetch TypeError. A code nested on `cause`
+  // still counts. XML parsing runs only after the response
+  // ends, so `Unable to parse XML.`, `Feed not recognized as RSS 1 or 2.`,
+  // xml2js syntax errors, and `Too many redirects` are not retried. A finished
+  // body that fails the parser stays non-transient even when the wording could
+  // also describe a short document. Other application errors are not retried.
+  it.each(TRANSIENT_FEED_FAILURES)(
+    "retries a transient $label once and then uses the feed",
+    async ({ failure }) => {
+      let attempts = 0;
+      const delays: number[] = [];
+      const gateway = new RssNewsGateway({
+        feeds: [{ id: "flaky", name: "Flaky", url: "https://flaky.example/feed" }],
+        now: () => FEED_NOW,
+        retryDelayMs: 5_000,
+        sleep: async (delayMs) => {
+          delays.push(delayMs);
+        },
+        parseFeed: async () => {
+          attempts += 1;
+
+          if (attempts === 1) {
+            throw failure;
+          }
+
+          return {
+            title: "Flaky",
+            items: [feedArticle("Recovered AI item", "https://flaky.example/recovered")],
+          };
+        },
+      });
+      const startedAt = Date.now();
+      const result = await gateway.callTool({
+        id: "retry-ok",
+        name: "search_news",
+        arguments: { query: "AI", limit: 5 },
+      });
+
+      expect(attempts).toBe(2);
+      expect(delays).toEqual([5_000]);
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(result).toEqual({
+        content: {
+          items: [expect.objectContaining({ title: "Recovered AI item", sourceId: "flaky" })],
+        },
+        isError: false,
+      });
+    },
+  );
+
+  it("audits a feed as succeeded when the single retry recovers", async () => {
+    let attempts = 0;
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "flaky", name: "Flaky", url: "https://flaky.example/feed" }],
+      now: () => FEED_NOW,
+      generateId: sequentialIds(),
+      sourceAudit: audit,
+      sleep: async () => undefined,
+      parseFeed: async () => {
+        attempts += 1;
+
+        if (attempts === 1) {
+          throw new Error("Status code 429");
+        }
+
+        return {
+          title: "Flaky",
+          items: [feedArticle("Recovered AI item", "https://flaky.example/recovered")],
+        };
+      },
+    });
+
+    const result = await gateway.callTool(
+      {
+        id: "retry-audit",
+        name: "search_news",
+        arguments: { query: "AI", limit: 5 },
+      },
+      { runId: "run-retry" },
+    );
+
+    expect(attempts).toBe(2);
+    expect(result.isError).toBe(false);
+    expect(audit.collections).toEqual([
+      expect.objectContaining({
+        runId: "run-retry",
+        sourceId: "flaky",
+        status: "succeeded",
+        itemCount: 1,
+        error: null,
+      }),
+    ]);
+  });
+
+  it("fails a feed once after two transient errors and keeps the other feeds", async () => {
+    const attempts = new Map<string, number>();
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [
+        { id: "flaky", url: "https://flaky.example/feed" },
+        { id: "working", name: "Working", url: "https://working.example/feed" },
+      ],
+      now: () => FEED_NOW,
+      generateId: sequentialIds(),
+      sourceAudit: audit,
+      retryDelayMs: 5_000,
+      sleep: async () => undefined,
+      parseFeed: async (url) => {
+        attempts.set(url, (attempts.get(url) ?? 0) + 1);
+
+        if (url.includes("flaky")) {
+          throw withCode("read ECONNRESET", "ECONNRESET");
+        }
+
+        return {
+          title: "Working",
+          items: [feedArticle("Working AI item", "https://working.example/ai")],
+        };
+      },
+    });
+    const startedAt = Date.now();
+    const result = await gateway.callTool(
+      {
+        id: "partial",
+        name: "search_news",
+        arguments: { query: "AI", limit: 5 },
+      },
+      { runId: "run-partial" },
+    );
+
+    expect(attempts.get("https://flaky.example/feed")).toBe(2);
+    expect(attempts.get("https://working.example/feed")).toBe(1);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(result).toEqual({
+      content: {
+        items: [expect.objectContaining({ title: "Working AI item", sourceId: "working" })],
+      },
+      isError: false,
+    });
+    expect(audit.collections).toHaveLength(2);
+    expect(audit.collections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: "working",
+          status: "succeeded",
+          itemCount: 1,
+        }),
+        expect.objectContaining({
+          sourceId: "flaky",
+          status: "failed",
+          itemCount: 0,
+          error: expect.objectContaining({ message: "read ECONNRESET" }),
+          items: [],
+        }),
+      ]),
+    );
+    expect(audit.collections.filter((collection) => collection.status === "failed")).toHaveLength(
+      1,
+    );
+  });
+
+  it("keeps the all-feeds-failed result when every transient retry is exhausted", async () => {
+    const attempts = new Map<string, number>();
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [
+        { id: "left", url: "https://left.example/feed" },
+        { id: "right", url: "https://right.example/feed" },
+      ],
+      now: () => FEED_NOW,
+      generateId: sequentialIds(),
+      sourceAudit: audit,
+      sleep: async () => undefined,
+      parseFeed: async (url) => {
+        attempts.set(url, (attempts.get(url) ?? 0) + 1);
+        throw new Error("Request timed out after 5000ms");
+      },
+    });
+
+    const result = await gateway.callTool(
+      {
+        id: "all-failed",
+        name: "search_news",
+        arguments: { query: "AI", limit: 5 },
+      },
+      { runId: "run-all-failed" },
+    );
+
+    expect(attempts.get("https://left.example/feed")).toBe(2);
+    expect(attempts.get("https://right.example/feed")).toBe(2);
+    expect(result).toEqual({
+      content: {
+        error: "All configured RSS feeds failed: Request timed out after 5000ms",
+      },
+      isError: true,
+    });
+    expect(audit.collections).toHaveLength(2);
+    expect(audit.collections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceId: "left", status: "failed", itemCount: 0, items: [] }),
+        expect.objectContaining({ sourceId: "right", status: "failed", itemCount: 0, items: [] }),
+      ]),
+    );
+  });
+
+  it.each(NON_TRANSIENT_FEED_FAILURES)(
+    "does not retry a non-transient $label",
+    async ({ failure }) => {
+      let attempts = 0;
+      const delays: number[] = [];
+      const gateway = new RssNewsGateway({
+        feeds: [
+          { id: "broken", url: "https://broken.example/feed" },
+          { id: "working", name: "Working", url: "https://working.example/feed" },
+        ],
+        now: () => FEED_NOW,
+        retryDelayMs: 5_000,
+        sleep: async (delayMs) => {
+          delays.push(delayMs);
+        },
+        parseFeed: async (url) => {
+          if (url.includes("broken")) {
+            attempts += 1;
+            throw failure;
+          }
+
+          return {
+            title: "Working",
+            items: [feedArticle("Working AI item", "https://working.example/ai")],
+          };
+        },
+      });
+
+      const result = await gateway.callTool({
+        id: "no-retry",
+        name: "search_news",
+        arguments: { query: "AI", limit: 5 },
+      });
+
+      expect(attempts).toBe(1);
+      expect(delays).toEqual([]);
+      expect(result).toEqual({
+        content: {
+          items: [expect.objectContaining({ title: "Working AI item" })],
+        },
+        isError: false,
+      });
+    },
+  );
+
+  it("sleeps for the default delay only through the injected timer", async () => {
+    const delays: number[] = [];
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "flaky", url: "https://flaky.example/feed" }],
+      now: () => FEED_NOW,
+      sleep: async (delayMs) => {
+        delays.push(delayMs);
+      },
+      parseFeed: async () => {
+        if (delays.length === 0) {
+          throw new Error("Request timed out after 5000ms");
+        }
+
+        return {
+          items: [feedArticle("Recovered AI item", "https://flaky.example/recovered")],
+        };
+      },
+    });
+    const startedAt = Date.now();
+
+    await gateway.callTool({
+      id: "default-delay",
+      name: "search_news",
+      arguments: { query: "AI", limit: 1 },
+    });
+
+    expect(delays).toEqual([400]);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
 });
 
 class RecordingSourceAudit implements SourceAuditStore {
@@ -439,4 +812,13 @@ class RecordingSourceAudit implements SourceAuditStore {
 function sequentialIds(): () => string {
   let value = 0;
   return () => `source-run-${(value += 1)}`;
+}
+
+function feedArticle(title: string, url: string) {
+  return {
+    title,
+    link: url,
+    isoDate: "2026-08-04T09:00:00.000Z",
+    contentSnippet: title,
+  };
 }
