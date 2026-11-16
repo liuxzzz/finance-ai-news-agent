@@ -68,6 +68,11 @@ export interface ParsedRssItem {
   guid?: string;
   pubDate?: string;
   isoDate?: string;
+  published?: string;
+  updated?: string;
+  "dc:date"?: string;
+  dcDate?: string;
+  date?: string;
   contentSnippet?: string;
   content?: string;
   summary?: string;
@@ -199,11 +204,10 @@ export class RssNewsGateway implements ToolGateway {
     if (options.parseFeed !== undefined) {
       this.parseFeed = options.parseFeed;
     } else {
-      const parser = new Parser({
-        headers: { "User-Agent": RSS_USER_AGENT },
-        timeout: positiveInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, "timeoutMs"),
-      });
-      this.parseFeed = async (url) => parser.parseURL(url);
+      const parser = createRssParser(
+        positiveInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, "timeoutMs"),
+      );
+      this.parseFeed = async (url) => adaptParsedFeed(await parser.parseURL(url));
     }
   }
 
@@ -428,6 +432,104 @@ export function validateRssFeedUrl(value: string): URL {
   return url;
 }
 
+/**
+ * rss-parser already copies Atom `published` / `updated` onto `pubDate` when the
+ * element text is a bare string, and it copies RSS `dc:date` onto `date` before
+ * deriving `isoDate`. Those mappings miss RSS `published` / `updated` / `date`,
+ * Atom `dc:date`, and element text stored under attributes. `elementDate` keeps
+ * a literal `<date>` off `item.date`, which is the Dublin Core alias `setISODate`
+ * already consumed.
+ */
+function createRssParser(timeoutMs: number): Parser {
+  return new Parser({
+    headers: { "User-Agent": RSS_USER_AGENT },
+    timeout: timeoutMs,
+    customFields: {
+      item: ["published", "updated", ["dc:date", "dcDate"], "dc:date", ["date", "elementDate"]],
+    },
+  });
+}
+
+function adaptParsedFeed(value: unknown): ParsedRssFeed {
+  if (!isRecord(value)) {
+    return { items: [] };
+  }
+
+  const title = readString(value.title);
+  const items = Array.isArray(value.items) ? value.items.map((item) => adaptParsedItem(item)) : [];
+  return {
+    ...(title === undefined ? {} : { title }),
+    items,
+  };
+}
+
+function adaptParsedItem(value: unknown): ParsedRssItem {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const literalDate = readString(value.elementDate);
+  const date =
+    literalDate !== undefined && literalDate.trim().length > 0
+      ? literalDate
+      : readString(value.date);
+
+  return {
+    ...optionalText("title", readString(value.title)),
+    ...optionalText("link", readString(value.link)),
+    ...optionalText("guid", readString(value.guid)),
+    ...optionalText("pubDate", readString(value.pubDate)),
+    ...optionalText("isoDate", readString(value.isoDate)),
+    ...optionalText("published", readString(value.published)),
+    ...optionalText("updated", readString(value.updated)),
+    ...optionalText("dc:date", readString(value["dc:date"])),
+    ...optionalText("dcDate", readString(value.dcDate)),
+    ...optionalText("date", date),
+    ...optionalText("contentSnippet", readString(value.contentSnippet)),
+    ...optionalText("content", readString(value.content)),
+    ...optionalText("summary", readString(value.summary)),
+  };
+}
+
+function optionalText<Key extends keyof ParsedRssItem>(
+  key: Key,
+  value: string | undefined,
+): Pick<ParsedRssItem, Key> | Record<string, never> {
+  if (value === undefined) {
+    return {};
+  }
+
+  return { [key]: value } as Pick<ParsedRssItem, Key>;
+}
+
+const PUBLISHED_AT_FIELDS = [
+  "isoDate",
+  "pubDate",
+  "published",
+  "updated",
+  "dc:date",
+  "dcDate",
+  "date",
+] as const satisfies readonly (keyof ParsedRssItem)[];
+
+function publishedTimestamp(item: ParsedRssItem): number | undefined {
+  for (const field of PUBLISHED_AT_FIELDS) {
+    const value = item[field];
+
+    if (typeof value !== "string") {
+      continue;
+    }
+
+    const parsed = Date.parse(value.trim());
+
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+
+  return undefined;
+}
+
 function normalizeItem(
   item: ParsedRssItem,
   sourceId: string,
@@ -443,14 +545,12 @@ function normalizeItem(
   }
 
   const excerpt = cleanText(item.contentSnippet ?? item.summary ?? item.content ?? "") ?? title;
-  const dateText = item.isoDate ?? item.pubDate;
-  const parsedTime = dateText === undefined ? Number.NaN : Date.parse(dateText);
+  const publishedTime = publishedTimestamp(item);
 
-  if (!Number.isFinite(parsedTime)) {
+  if (publishedTime === undefined) {
     return null;
   }
 
-  const publishedTime = parsedTime;
   const raw = parsedRssItemJson(item);
   const contentHash = createHash("sha256").update(JSON.stringify(raw)).digest("hex");
 
@@ -615,6 +715,11 @@ function parsedRssItemJson(item: ParsedRssItem): JsonObject {
       guid: item.guid,
       pubDate: item.pubDate,
       isoDate: item.isoDate,
+      published: item.published,
+      updated: item.updated,
+      "dc:date": item["dc:date"],
+      dcDate: item.dcDate,
+      date: item.date,
       contentSnippet: item.contentSnippet,
       content: item.content,
       summary: item.summary,
