@@ -14,6 +14,9 @@ import {
 const MIXED_FIXTURE = fileURLToPath(
   new URL("../../../fixtures/source-diagnosis/mixed.json", import.meta.url),
 );
+const ALTERNATE_DATE_FIXTURE = fileURLToPath(
+  new URL("../../../fixtures/source-diagnosis/alternate-dates.json", import.meta.url),
+);
 
 describe("source diagnosis command", () => {
   it("requires one local fixture and accepts strict mode", () => {
@@ -41,9 +44,9 @@ describe("source diagnosis command", () => {
               feed: {
                 items: [
                   {
-                    title: "Published only",
+                    title: "Author only",
                     link: "https://dates.invalid/item",
-                    published: "2026-08-04T09:00:00.000Z",
+                    author: "Wire Desk",
                   },
                 ],
               },
@@ -51,7 +54,7 @@ describe("source diagnosis command", () => {
           ],
         }),
       ),
-    ).toThrow("unknown field published");
+    ).toThrow("unknown field author");
     expect(() =>
       parseSourceDiagnosisFixture(
         JSON.stringify({
@@ -123,6 +126,47 @@ describe("source diagnosis command", () => {
         process.env.RSS_FEED_URLS = previousFeeds;
       }
     }
+  });
+
+  it("classifies alternate date fields from a local fixture", async () => {
+    const fixture = parseSourceDiagnosisFixture(await readFile(ALTERNATE_DATE_FIXTURE, "utf8"));
+    const report = await createSourceDiagnosisReport(fixture);
+
+    expect(report.feeds.map((feed) => [feed.sourceId, feed.outcome])).toEqual([
+      ["published-wire", "available"],
+      ["window-wire", "available"],
+      ["invalid-wire", "filtered"],
+    ]);
+    expect(report.feeds[0]).toMatchObject({
+      received: 2,
+      normalized: 2,
+      fresh: 2,
+      dropped: { invalid: 0, stale: 0, future: 0 },
+      error: null,
+    });
+    expect(report.feeds[1]).toMatchObject({
+      received: 4,
+      normalized: 4,
+      fresh: 1,
+      dropped: { invalid: 0, stale: 1, future: 2 },
+      error: null,
+    });
+    expect(report.feeds[2]).toMatchObject({
+      received: 1,
+      normalized: 0,
+      fresh: 0,
+      dropped: { invalid: 1, stale: 0, future: 0 },
+      error: null,
+    });
+    expect(report.summary).toEqual({
+      feedCount: 3,
+      available: 2,
+      empty: 0,
+      filtered: 1,
+      requestFailed: 0,
+      freshItems: 3,
+      dedupedFreshItems: 3,
+    });
   });
 
   it("does not fetch when the fixture path cannot be read", async () => {

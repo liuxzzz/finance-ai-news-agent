@@ -11,8 +11,13 @@ const ITEM_FIELDS = [
   "title",
   "link",
   "guid",
-  "pubDate",
   "isoDate",
+  "pubDate",
+  "published",
+  "updated",
+  "dc:date",
+  "dcDate",
+  "date",
   "contentSnippet",
   "content",
   "summary",
@@ -23,8 +28,13 @@ interface DiagnosisFixtureItem {
   title?: string;
   link?: string;
   guid?: string;
-  pubDate?: string;
   isoDate?: string;
+  pubDate?: string;
+  published?: string;
+  updated?: string;
+  "dc:date"?: string;
+  dcDate?: string;
+  date?: string;
   contentSnippet?: string;
   content?: string;
   summary?: string;

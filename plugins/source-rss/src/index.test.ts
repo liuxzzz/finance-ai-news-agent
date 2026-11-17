@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { createServer } from "node:http";
+
 import type {
   RawSourceItemRecord,
   RecordSourceCollectionInput,
@@ -9,6 +12,88 @@ import { describe, expect, it } from "vitest";
 import { RssNewsGateway, validateRssFeedUrl } from "./index.js";
 
 const FEED_NOW = Date.parse("2026-08-04T12:00:00.000Z");
+const RSS_DATE_FEED = `<?xml version="1.0"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Dates</title>
+    <item>
+      <title>Published only</title>
+      <link>https://example.com/published</link>
+      <published>2026-08-04T09:00:00.000Z</published>
+    </item>
+    <item>
+      <title>Updated only</title>
+      <link>https://example.com/updated</link>
+      <updated>2026-08-04T08:00:00.000Z</updated>
+    </item>
+    <item>
+      <title>Date only</title>
+      <link>https://example.com/date</link>
+      <date>2026-08-04T07:00:00.000Z</date>
+    </item>
+    <item>
+      <title>Dublin core only</title>
+      <link>https://example.com/dc</link>
+      <dc:date>2026-08-04T06:00:00.000Z</dc:date>
+    </item>
+    <item>
+      <title>PubDate wins</title>
+      <link>https://example.com/pub</link>
+      <pubDate>Mon, 03 Aug 2026 08:00:00 GMT</pubDate>
+      <published>2026-08-04T09:00:00.000Z</published>
+    </item>
+    <item>
+      <title>Bad pubDate valid dc</title>
+      <link>https://example.com/bad-pub</link>
+      <pubDate>not-a-date</pubDate>
+      <dc:date>2026-08-04T05:00:00.000Z</dc:date>
+    </item>
+    <item>
+      <title>Both dates</title>
+      <link>https://example.com/both</link>
+      <dc:date>2026-08-03T09:00:00.000Z</dc:date>
+      <date>2026-08-04T09:00:00.000Z</date>
+    </item>
+    <item>
+      <title>Standard pubDate</title>
+      <link>https://example.com/standard</link>
+      <pubDate>Tue, 04 Aug 2026 11:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Stale published</title>
+      <link>https://example.com/stale</link>
+      <published>2026-07-01T10:00:00.000Z</published>
+    </item>
+    <item>
+      <title>Far future updated</title>
+      <link>https://example.com/future</link>
+      <updated>2099-01-01T00:00:00.000Z</updated>
+    </item>
+  </channel>
+</rss>`;
+const ATOM_DATE_FEED = `<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <title>Atom dates</title>
+  <entry>
+    <title>Atom updated attribute</title>
+    <id>https://example.com/atom-updated</id>
+    <link href="https://example.com/atom-updated"/>
+    <updated type="text">2026-08-04T10:00:00.000Z</updated>
+  </entry>
+  <entry>
+    <title>Atom dublin core</title>
+    <id>https://example.com/atom-dc</id>
+    <link href="https://example.com/atom-dc"/>
+    <dc:date>2026-08-04T04:00:00.000Z</dc:date>
+  </entry>
+  <entry>
+    <title>Atom published preferred</title>
+    <id>https://example.com/atom-published</id>
+    <link href="https://example.com/atom-published"/>
+    <published>2026-08-04T03:00:00.000Z</published>
+    <updated>2026-08-04T02:00:00.000Z</updated>
+  </entry>
+</feed>`;
 
 // Shapes produced by rss-parser 3.13, Node sockets, and fetch. See the retry
 // tests below for which of these are transient.
@@ -785,6 +870,423 @@ describe("RSS news gateway", () => {
 
     expect(delays).toEqual([400]);
     expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("keeps items dated only by updated, published, dc:date, dcDate, or date", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [
+        { id: "dates", name: "Dates", url: "https://dates.example/feed" },
+        { id: "broken", url: "https://broken.example/feed" },
+      ],
+      now: () => FEED_NOW,
+      parseFeed: async (url) => {
+        if (url.includes("broken")) {
+          throw new Error("feed unavailable");
+        }
+
+        return {
+          items: [
+            {
+              title: "Updated only",
+              link: "https://dates.example/updated",
+              updated: "2026-08-04T09:30:00.000Z",
+            },
+            {
+              title: "Published only",
+              link: "https://dates.example/published",
+              published: "2026-08-04T08:15:00Z",
+            },
+            {
+              title: "Dublin core colon",
+              link: "https://dates.example/dc-colon",
+              "dc:date": "2026-08-04T07:00:00.000Z",
+            },
+            {
+              title: "Dublin core mapped",
+              link: "https://dates.example/dc-mapped",
+              dcDate: "2026-08-04T06:00:00.000Z",
+            },
+            {
+              title: "Date element",
+              link: "https://dates.example/date",
+              date: "Tue, 04 Aug 2026 05:00:00 GMT",
+            },
+          ],
+        };
+      },
+    });
+
+    const result = await gateway.callTool({
+      id: "alternate-dates",
+      name: "search_news",
+      arguments: { query: "unmatched", limit: 10 },
+    });
+    const items = (result.content as { items: Array<{ title: string; publishedAt: string }> })
+      .items;
+
+    expect(result.isError).toBe(false);
+    expect(items).toEqual([
+      expect.objectContaining({
+        title: "Updated only",
+        publishedAt: "2026-08-04T09:30:00.000Z",
+      }),
+      expect.objectContaining({
+        title: "Published only",
+        publishedAt: "2026-08-04T08:15:00.000Z",
+      }),
+      expect.objectContaining({
+        title: "Dublin core colon",
+        publishedAt: "2026-08-04T07:00:00.000Z",
+      }),
+      expect.objectContaining({
+        title: "Dublin core mapped",
+        publishedAt: "2026-08-04T06:00:00.000Z",
+      }),
+      expect.objectContaining({
+        title: "Date element",
+        publishedAt: "2026-08-04T05:00:00.000Z",
+      }),
+    ]);
+  });
+
+  it("prefers the first parseable field in isoDate, pubDate, then alternate order", async () => {
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "dates", url: "https://dates.example/feed" }],
+      now: () => FEED_NOW,
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "Iso wins",
+            link: "https://dates.example/iso",
+            isoDate: "2026-08-04T09:00:00.000Z",
+            pubDate: "2026-08-04T08:00:00.000Z",
+            published: "2026-08-04T07:00:00.000Z",
+            updated: "2026-08-04T06:00:00.000Z",
+            "dc:date": "2026-08-04T05:00:00.000Z",
+            dcDate: "2026-08-04T04:00:00.000Z",
+            date: "2026-08-04T03:00:00.000Z",
+          },
+          {
+            title: "Pub wins",
+            link: "https://dates.example/pub",
+            isoDate: "not-a-date",
+            pubDate: "Mon, 03 Aug 2026 08:00:00 GMT",
+            published: "2026-08-04T09:00:00.000Z",
+            updated: "2026-08-04T01:00:00.000Z",
+          },
+          {
+            title: "Published after bad prefixes",
+            link: "https://dates.example/fallthrough",
+            isoDate: "tomorrow",
+            pubDate: "yesterday",
+            published: "2026-08-04T10:00:00.000Z",
+            updated: "2026-08-04T01:00:00.000Z",
+            date: "2026-08-04T02:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool({
+      id: "date-priority",
+      name: "search_news",
+      arguments: { query: "unmatched", limit: 10 },
+    });
+    const items = (result.content as { items: Array<{ title: string; publishedAt: string }> })
+      .items;
+
+    expect(items).toEqual([
+      expect.objectContaining({
+        title: "Published after bad prefixes",
+        publishedAt: "2026-08-04T10:00:00.000Z",
+      }),
+      expect.objectContaining({
+        title: "Iso wins",
+        publishedAt: "2026-08-04T09:00:00.000Z",
+      }),
+      expect.objectContaining({
+        title: "Pub wins",
+        publishedAt: "2026-08-03T08:00:00.000Z",
+      }),
+    ]);
+  });
+
+  it("drops items when every date field is missing or unparseable", async () => {
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "dates", url: "https://dates.example/feed" }],
+      now: () => FEED_NOW,
+      generateId: sequentialIds(),
+      sourceAudit: audit,
+      parseFeed: async () => ({
+        items: [
+          { title: "No date", link: "https://dates.example/none" },
+          {
+            title: "Bad dates",
+            link: "https://dates.example/bad",
+            isoDate: "not-a-date",
+            pubDate: "yesterday",
+            published: "nope",
+            updated: "",
+            "dc:date": "32/13/2026",
+            dcDate: "bogus",
+            date: "still-no",
+          },
+          {
+            title: "Kept via date",
+            link: "https://dates.example/kept",
+            date: "2026-08-04T09:00:00.000Z",
+            contentSnippet: "Kept",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool(
+      {
+        id: "drop-undated",
+        name: "search_news",
+        arguments: { query: "unmatched", limit: 10 },
+      },
+      { runId: "run-dates" },
+    );
+    const items = (result.content as { items: Array<{ title: string }> }).items;
+
+    expect(result.isError).toBe(false);
+    expect(items.map((item) => item.title)).toEqual(["Kept via date"]);
+    expect(audit.collections).toEqual([
+      expect.objectContaining({
+        sourceId: "dates",
+        status: "succeeded",
+        itemCount: 1,
+        items: [
+          expect.objectContaining({
+            title: "Kept via date",
+            publishedAt: "2026-08-04T09:00:00.000Z",
+            raw: {
+              title: "Kept via date",
+              link: "https://dates.example/kept",
+              date: "2026-08-04T09:00:00.000Z",
+              contentSnippet: "Kept",
+            },
+          }),
+        ],
+      }),
+    ]);
+  });
+
+  it("filters stale and future alternate dates with the existing window", async () => {
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "dates", url: "https://dates.example/feed" }],
+      maxItemAgeHours: 48,
+      now: () => FEED_NOW,
+      generateId: sequentialIds(),
+      sourceAudit: audit,
+      parseFeed: async () => ({
+        items: [
+          {
+            title: "Fresh updated",
+            link: "https://dates.example/fresh",
+            updated: "2026-08-04T11:00:00.000Z",
+          },
+          {
+            title: "Stale published",
+            link: "https://dates.example/stale",
+            published: "2026-07-01T10:00:00.000Z",
+          },
+          {
+            title: "Within skew",
+            link: "https://dates.example/skew",
+            dcDate: "2026-08-04T14:00:00.000Z",
+          },
+          {
+            title: "Beyond skew",
+            link: "https://dates.example/beyond",
+            date: "2026-08-05T12:00:00.000Z",
+          },
+          {
+            title: "Far future",
+            link: "https://dates.example/future",
+            "dc:date": "2099-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool(
+      {
+        id: "alternate-window",
+        name: "search_news",
+        arguments: { query: "unmatched", limit: 10 },
+      },
+      { runId: "run-window" },
+    );
+    const items = (result.content as { items: Array<{ title: string }> }).items;
+
+    expect(items.map((item) => item.title)).toEqual(["Within skew", "Fresh updated"]);
+    expect(audit.collections[0]?.itemCount).toBe(5);
+    expect(audit.collections[0]?.items.map((item) => item.title).sort()).toEqual([
+      "Beyond skew",
+      "Far future",
+      "Fresh updated",
+      "Stale published",
+      "Within skew",
+    ]);
+  });
+
+  it("keeps alternate date fields in the raw payload used for the content hash", async () => {
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "dates", url: "https://dates.example/feed" }],
+      now: () => FEED_NOW,
+      generateId: sequentialIds(),
+      sourceAudit: audit,
+      parseFeed: async () => ({
+        items: [
+          {
+            guid: "ext-date",
+            title: "Updated story",
+            link: "https://dates.example/story",
+            isoDate: "not-a-date",
+            published: "also-bad",
+            updated: "2026-08-04T09:00:00.000Z",
+            contentSnippet: "Evidence",
+          },
+        ],
+      }),
+    });
+
+    await gateway.callTool(
+      {
+        id: "raw-dates",
+        name: "search_news",
+        arguments: { query: "story", limit: 1 },
+      },
+      { runId: "run-raw-dates" },
+    );
+    const raw = {
+      title: "Updated story",
+      link: "https://dates.example/story",
+      guid: "ext-date",
+      isoDate: "not-a-date",
+      published: "also-bad",
+      updated: "2026-08-04T09:00:00.000Z",
+      contentSnippet: "Evidence",
+    };
+    const recorded = audit.collections[0]?.items[0];
+
+    expect(recorded).toEqual(
+      expect.objectContaining({
+        externalId: "ext-date",
+        publishedAt: "2026-08-04T09:00:00.000Z",
+        raw,
+        contentHash: createHash("sha256").update(JSON.stringify(raw)).digest("hex"),
+      }),
+    );
+  });
+
+  it("reads alternate date fields through the default rss-parser custom fields", async () => {
+    const userAgents: string[] = [];
+    const server = createServer((request, response) => {
+      userAgents.push(request.headers["user-agent"] ?? "");
+      const body = request.url?.includes("atom") ? ATOM_DATE_FEED : RSS_DATE_FEED;
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+        connection: "close",
+      });
+      response.end(body);
+    });
+
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+
+    if (address === null || typeof address === "string") {
+      throw new Error("RSS test server did not bind to a TCP port.");
+    }
+
+    try {
+      const audit = new RecordingSourceAudit();
+      const gateway = new RssNewsGateway({
+        feeds: [
+          { id: "rss", name: "RSS", url: `http://127.0.0.1:${address.port}/rss` },
+          { id: "atom", name: "Atom", url: `http://127.0.0.1:${address.port}/atom` },
+        ],
+        timeoutMs: 2_000,
+        now: () => FEED_NOW,
+        generateId: sequentialIds(),
+        sourceAudit: audit,
+      });
+      const result = await gateway.callTool(
+        {
+          id: "parser-dates",
+          name: "search_news",
+          arguments: { query: "unmatched", limit: 20 },
+        },
+        { runId: "run-parser-dates" },
+      );
+      const items = (result.content as { items: Array<{ title: string; publishedAt: string }> })
+        .items;
+      const rssAudit = audit.collections.find((collection) => collection.sourceId === "rss");
+      const both = rssAudit?.items.find((item) => item.title === "Both dates");
+      const standard = rssAudit?.items.find((item) => item.title === "Standard pubDate");
+      const badPubDate = rssAudit?.items.find((item) => item.title === "Bad pubDate valid dc");
+
+      expect(result.isError).toBe(false);
+      expect(userAgents).toEqual([
+        "finance-ai-news-agent (+https://github.com/liuxzzz/finance-ai-news-agent)",
+        "finance-ai-news-agent (+https://github.com/liuxzzz/finance-ai-news-agent)",
+      ]);
+      expect(items.map((item) => [item.title, item.publishedAt]).sort()).toEqual(
+        [
+          ["Atom dublin core", "2026-08-04T04:00:00.000Z"],
+          ["Atom published preferred", "2026-08-04T03:00:00.000Z"],
+          ["Atom updated attribute", "2026-08-04T10:00:00.000Z"],
+          ["Bad pubDate valid dc", "2026-08-04T05:00:00.000Z"],
+          ["Both dates", "2026-08-03T09:00:00.000Z"],
+          ["Date only", "2026-08-04T07:00:00.000Z"],
+          ["Dublin core only", "2026-08-04T06:00:00.000Z"],
+          ["PubDate wins", "2026-08-03T08:00:00.000Z"],
+          ["Published only", "2026-08-04T09:00:00.000Z"],
+          ["Standard pubDate", "2026-08-04T11:00:00.000Z"],
+          ["Updated only", "2026-08-04T08:00:00.000Z"],
+        ].sort(),
+      );
+      expect(items.map((item) => item.title)).not.toContain("Stale published");
+      expect(items.map((item) => item.title)).not.toContain("Far future updated");
+      expect(rssAudit?.itemCount).toBe(10);
+      expect(standard?.raw).toEqual({
+        title: "Standard pubDate",
+        link: "https://example.com/standard",
+        pubDate: "Tue, 04 Aug 2026 11:00:00 GMT",
+        isoDate: "2026-08-04T11:00:00.000Z",
+      });
+      expect(both?.publishedAt).toBe("2026-08-03T09:00:00.000Z");
+      expect(both?.raw).toEqual({
+        title: "Both dates",
+        link: "https://example.com/both",
+        isoDate: "2026-08-03T09:00:00.000Z",
+        "dc:date": "2026-08-03T09:00:00.000Z",
+        dcDate: "2026-08-03T09:00:00.000Z",
+        date: "2026-08-04T09:00:00.000Z",
+      });
+      expect(badPubDate?.raw).toEqual({
+        title: "Bad pubDate valid dc",
+        link: "https://example.com/bad-pub",
+        pubDate: "not-a-date",
+        "dc:date": "2026-08-04T05:00:00.000Z",
+        dcDate: "2026-08-04T05:00:00.000Z",
+        date: "2026-08-04T05:00:00.000Z",
+      });
+      expect(JSON.stringify(rssAudit?.items)).not.toContain("elementDate");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 });
 

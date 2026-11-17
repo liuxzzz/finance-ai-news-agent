@@ -345,6 +345,204 @@ describe("RSS collection diagnosis", () => {
     });
   });
 
+  it("classifies alternate date fields the same way in search and diagnosis", async () => {
+    let attempts = 0;
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [
+        { id: "published", url: "https://published.invalid/feed" },
+        { id: "window", url: "https://window.invalid/feed" },
+        { id: "invalid", url: "https://invalid.invalid/feed" },
+        { id: "flaky", url: "https://flaky.invalid/feed" },
+      ],
+      now: () => FEED_NOW,
+      maxItemAgeHours: 48,
+      generateId: sequentialIds(),
+      sourceAudit: audit,
+      sleep: async () => undefined,
+      parseFeed: async (url) => {
+        if (url.includes("published")) {
+          return {
+            items: [
+              {
+                title: "Published only",
+                link: "https://published.invalid/item",
+                published: "2026-08-04T09:00:00.000Z",
+              },
+              {
+                title: "Published after bad prefixes",
+                link: "https://published.invalid/fallback",
+                isoDate: "not-a-date",
+                pubDate: "yesterday",
+                published: "2026-08-04T10:00:00.000Z",
+              },
+            ],
+          };
+        }
+
+        if (url.includes("window")) {
+          return {
+            items: [
+              {
+                title: "Stale updated",
+                link: "https://window.invalid/stale",
+                updated: "2026-07-01T00:00:00.000Z",
+              },
+              {
+                title: "Within skew",
+                link: "https://window.invalid/skew",
+                "dc:date": new Date(LATEST).toISOString(),
+              },
+              {
+                title: "Beyond skew",
+                link: "https://window.invalid/beyond",
+                dcDate: new Date(LATEST + 1).toISOString(),
+              },
+              {
+                title: "Far future",
+                link: "https://window.invalid/future",
+                date: "2099-01-01T00:00:00.000Z",
+              },
+            ],
+          };
+        }
+
+        if (url.includes("invalid.invalid")) {
+          return {
+            items: [
+              {
+                title: "All dates bad",
+                link: "https://invalid.invalid/bad",
+                isoDate: "not-a-date",
+                pubDate: "yesterday",
+                published: "nope",
+                updated: "",
+                "dc:date": "bogus",
+                dcDate: "still-no",
+                date: "never",
+              },
+            ],
+          };
+        }
+
+        attempts += 1;
+
+        if (attempts === 1) {
+          throw new Error("Status code 503");
+        }
+
+        return {
+          items: [
+            {
+              title: "Recovered updated",
+              link: "https://flaky.invalid/item",
+              updated: "2026-08-04T08:00:00.000Z",
+            },
+          ],
+        };
+      },
+    });
+
+    const report = await gateway.diagnose({ runId: "run-alternate" });
+    const result = await gateway.callTool(
+      { id: "alternate", name: "search_news", arguments: { query: "zzzz", limit: 10 } },
+      { runId: "run-alternate" },
+    );
+    const items = (
+      result.content as { items: Array<{ title: string; publishedAt: string }> }
+    ).items.map((item) => [item.title, item.publishedAt]);
+
+    expect(attempts).toBe(2);
+    expect(report.feeds).toEqual([
+      expect.objectContaining({
+        sourceId: "published",
+        outcome: "available",
+        received: 2,
+        normalized: 2,
+        fresh: 2,
+        dropped: { invalid: 0, stale: 0, future: 0 },
+        error: null,
+      }),
+      expect.objectContaining({
+        sourceId: "window",
+        outcome: "available",
+        received: 4,
+        normalized: 4,
+        fresh: 1,
+        dropped: { invalid: 0, stale: 1, future: 2 },
+        error: null,
+      }),
+      expect.objectContaining({
+        sourceId: "invalid",
+        outcome: "filtered",
+        received: 1,
+        normalized: 0,
+        fresh: 0,
+        dropped: { invalid: 1, stale: 0, future: 0 },
+        error: null,
+      }),
+      expect.objectContaining({
+        sourceId: "flaky",
+        outcome: "available",
+        received: 1,
+        normalized: 1,
+        fresh: 1,
+        dropped: { invalid: 0, stale: 0, future: 0 },
+        error: null,
+      }),
+    ]);
+    expect(report.summary).toEqual({
+      feedCount: 4,
+      available: 3,
+      empty: 0,
+      filtered: 1,
+      requestFailed: 0,
+      freshItems: 4,
+      dedupedFreshItems: 4,
+    });
+    expect(result.isError).toBe(false);
+    expect(items).toEqual([
+      ["Within skew", "2026-08-04T15:00:00.000Z"],
+      ["Published after bad prefixes", "2026-08-04T10:00:00.000Z"],
+      ["Recovered updated", "2026-08-04T08:00:00.000Z"],
+      ["Published only", "2026-08-04T09:00:00.000Z"],
+    ]);
+    expect(audit.collections).toHaveLength(4);
+    expect(audit.collections.map((collection) => collection.sourceId)).toEqual([
+      "published",
+      "window",
+      "invalid",
+      "flaky",
+    ]);
+    expect(audit.collections[1]).toEqual(
+      expect.objectContaining({
+        status: "succeeded",
+        itemCount: 4,
+        disposition: expect.objectContaining({
+          outcome: "available",
+          fresh: 1,
+          dropped: { invalid: 0, stale: 1, future: 2 },
+        }),
+      }),
+    );
+    expect(audit.collections[2]).toEqual(
+      expect.objectContaining({
+        status: "succeeded",
+        itemCount: 0,
+        items: [],
+        disposition: expect.objectContaining({ outcome: "filtered", normalized: 0 }),
+      }),
+    );
+    expect(audit.collections[3]).toEqual(
+      expect.objectContaining({
+        status: "succeeded",
+        itemCount: 1,
+        error: null,
+        disposition: expect.objectContaining({ outcome: "available", fresh: 1 }),
+      }),
+    );
+  });
+
   it("rejects a diagnosis whose counts do not balance", () => {
     expect(() =>
       rssFeedDiagnosis({

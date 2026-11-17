@@ -248,7 +248,7 @@ node --env-file-if-exists=.env.local --env-file-if-exists=.env.feishu.local \
 | `filtered`       | Feed 有条目，但没有一条进入候选。`dropped` 分开统计无法规范化、过期和超出未来时钟偏差的数量 |
 | `request_failed` | 请求最终失败。瞬时失败仍只重试一次，报告里只有最终结果                                      |
 
-`dropped.invalid` 表示现有采集器无法规范化的条目，包含缺少标题、可用链接或可解析发布时间。Fixture 只接受采集器当前读取的字段：`title`、`link`、`guid`、`pubDate`、`isoDate`、`contentSnippet`、`content`、`summary`。写上 `published` 这类未读取字段会直接报错，而不会被静默当成无日期。
+`dropped.invalid` 表示现有采集器无法规范化的条目，包含缺少标题、可用链接或可解析发布时间。发布时间按 `isoDate`、`pubDate`、`published`、`updated`、`dc:date`、`dcDate`、`date` 取第一个可解析的值；这些字段全部缺失或全部无法解析时，条目仍记为 invalid，采集时刻不会拿来填发布时间。Fixture 只接受采集器当前读取的字段：`title`、`link`、`guid`、`isoDate`、`pubDate`、`published`、`updated`、`dc:date`、`dcDate`、`date`、`contentSnippet`、`content`、`summary`。写上采集器不读取的字段会直接报错，而不会被静默忽略。
 
 默认打印 JSON 后退出码为 0，方便查看不健康来源。`--strict` 仍打印同一份 JSON，并在任一来源不是 `available` 时退出码为 1。命令不读取数据库、模型密钥、飞书 Webhook 或 `RSS_FEED_URLS`，也不访问 fixture 里的 URL。Fixture 的 `now` 和 `maxItemAgeHours` 决定窗口；省略 `now` 时使用当前时钟，省略 `maxItemAgeHours` 时使用 48。未来时间仍沿用采集器固定的 3 小时偏差。同一 URL 在多个来源出现时，每个来源仍按自己的条数分类，`summary.dedupedFreshItems` 才是去重后的候选数。
 

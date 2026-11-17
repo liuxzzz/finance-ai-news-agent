@@ -1,0 +1,75 @@
+{
+  "now": "2026-08-04T12:00:00.000Z",
+  "maxItemAgeHours": 48,
+  "feeds": [
+    {
+      "id": "published-wire",
+      "name": "Published Wire",
+      "url": "https://published.invalid/feed",
+      "feed": {
+        "title": "Published Wire",
+        "items": [
+          {
+            "title": "Published only",
+            "link": "https://published.invalid/fresh",
+            "published": "2026-08-04T09:00:00.000Z"
+          },
+          {
+            "title": "Published after bad prefixes",
+            "link": "https://published.invalid/fallback",
+            "isoDate": "not-a-date",
+            "pubDate": "yesterday",
+            "published": "2026-08-04T10:00:00.000Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "window-wire",
+      "url": "https://window.invalid/feed",
+      "feed": {
+        "items": [
+          {
+            "title": "Stale updated",
+            "link": "https://window.invalid/stale",
+            "updated": "2026-07-01T00:00:00.000Z"
+          },
+          {
+            "title": "Within skew",
+            "link": "https://window.invalid/skew",
+            "dc:date": "2026-08-04T15:00:00.000Z"
+          },
+          {
+            "title": "Beyond skew",
+            "link": "https://window.invalid/beyond",
+            "dcDate": "2026-08-04T15:00:00.001Z"
+          },
+          {
+            "title": "Far future date",
+            "link": "https://window.invalid/future",
+            "date": "2099-01-01T00:00:00.000Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "invalid-wire",
+      "url": "https://invalid.invalid/feed",
+      "feed": {
+        "items": [
+          {
+            "title": "All dates bad",
+            "link": "https://invalid.invalid/bad",
+            "isoDate": "not-a-date",
+            "pubDate": "yesterday",
+            "published": "nope",
+            "updated": "",
+            "dc:date": "bogus",
+            "dcDate": "still-no",
+            "date": "never"
+          }
+        ]
+      }
+    }
+  ]
+}
