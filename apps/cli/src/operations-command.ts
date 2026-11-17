@@ -55,7 +55,7 @@ export async function showOperationalMetrics(args: string[]): Promise<void> {
   const pool = createPostgresPool({ connectionString: requireDatabaseUrl() });
 
   try {
-    const [runs, model, sources, deliveries, storyMemory] = await Promise.all([
+    const [runs, model, sources, sourceOutcomes, deliveries, storyMemory] = await Promise.all([
       pool.query<{ status: string; count: number; average_duration_seconds: number | null }>(
         `
           SELECT
@@ -93,6 +93,18 @@ export async function showOperationalMetrics(args: string[]): Promise<void> {
         `,
         [days],
       ),
+      pool.query<{ outcome: string; calls: number }>(
+        `
+          SELECT
+            coalesce(disposition->>'outcome', 'unrecorded') AS outcome,
+            count(*)::integer AS calls
+          FROM source_runs
+          WHERE created_at >= now() - ($1::integer * interval '1 day')
+          GROUP BY outcome
+          ORDER BY outcome
+        `,
+        [days],
+      ),
       pool.query<{ status: string; count: number }>(
         `
           SELECT status, count(*)::integer AS count
@@ -125,6 +137,7 @@ export async function showOperationalMetrics(args: string[]): Promise<void> {
           runs: runs.rows,
           model: model.rows[0] ?? { requests: 0, tokens: 0 },
           sources: sources.rows,
+          sourceOutcomes: sourceOutcomes.rows,
           deliveries: deliveries.rows,
           storyMemory: storyMemory.rows[0] ?? { events: 0, updates: 0, ongoing_events: 0 },
         },

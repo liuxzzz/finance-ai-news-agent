@@ -8,6 +8,7 @@ import {
   showOperationalHealth,
   showOperationalMetrics,
 } from "./operations-command.js";
+import { diagnoseSources } from "./source-diagnosis-command.js";
 import { migrateDatabase, runPersistentFixture, showRunStatus } from "./runtime-command.js";
 import { manageDailySchedule } from "./scheduler-command.js";
 
@@ -32,6 +33,8 @@ try {
     await showOperationalHealth();
   } else if (command === "metrics") {
     await showOperationalMetrics(process.argv.slice(3));
+  } else if (command === "diagnose-sources") {
+    await diagnoseSources(process.argv.slice(3));
   } else if (command === "notify-failure") {
     await notifyScheduledFailure(process.argv.slice(3));
   } else {
@@ -57,6 +60,7 @@ function printHelp(): void {
       "  finance-ai-news-agent schedule <action>    Install, inspect, or remove the daily job",
       "  finance-ai-news-agent health               Check database and production configuration",
       "  finance-ai-news-agent metrics [--days 7]   Show recent operational metrics",
+      "  finance-ai-news-agent diagnose-sources     Classify a local RSS fixture",
       "",
       "Run options:",
       "  --tenant <id>              Default: default",
@@ -70,6 +74,11 @@ function printHelp(): void {
       "  schedule install [--hour 8] [--minute 0]",
       "  schedule status",
       "  schedule uninstall",
+      "",
+      "Diagnose options:",
+      "  diagnose-sources --fixture <file> [--strict]",
+      "  Local JSON only. Does not fetch feeds, use the database, or send messages.",
+      "  Exit 0 by default. --strict exits 1 unless every feed outcome is available.",
       "",
     ].join("\n"),
   );

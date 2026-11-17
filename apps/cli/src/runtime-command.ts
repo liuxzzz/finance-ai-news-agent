@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 
 import { createAgentGraph, LangGraphAgentWorkflow, RunExecutor } from "@finance-ai-news-agent/core";
 import { FileOutputPlugin } from "@finance-ai-news-agent/output-file";
+import type { SourceRunRecord } from "@finance-ai-news-agent/plugin-sdk";
 import {
   createPostgresCheckpointer,
   createPostgresPool,
@@ -150,7 +151,7 @@ export async function showRunStatus(
         `Identity: ${run.tenantId}/${run.reportDate}/${run.edition}`,
         `Attempts: ${run.attemptCount}`,
         `Stages: ${stages.map((stage) => `${stage.stage}#${stage.attempt}:${stage.status}`).join(", ") || "none"}`,
-        `Sources: ${sourceRuns.map((source) => `${source.sourceId}:${source.status}`).join(", ") || "none"}`,
+        `Sources: ${sourceRuns.map((source) => formatSourceRunSummary(source)).join(", ") || "none"}`,
         `Raw items: ${rawSourceItems.length}`,
         `Normalized evidence: ${normalizedContentItems.length}`,
         `Story events: ${storyEvents.length}`,
@@ -166,6 +167,18 @@ export async function showRunStatus(
   } finally {
     await pool.end();
   }
+}
+
+export function formatSourceRunSummary(
+  source: Pick<SourceRunRecord, "sourceId" | "status" | "disposition">,
+): string {
+  const outcome = source.disposition?.outcome;
+
+  if (typeof outcome !== "string" || outcome.length === 0) {
+    return `${source.sourceId}:${source.status}`;
+  }
+
+  return `${source.sourceId}:${source.status}:${outcome}`;
 }
 
 export interface RunCommandOptions {
