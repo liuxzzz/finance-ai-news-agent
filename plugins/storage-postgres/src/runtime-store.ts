@@ -78,7 +78,7 @@ const MODEL_CALL_COLUMNS = `
 
 const SOURCE_RUN_COLUMNS = `
   id, run_id, source_id, source_url_fingerprint, attempt, status,
-  item_count, error, started_at, finished_at, created_at
+  item_count, disposition, error, started_at, finished_at, created_at
 `;
 
 const RAW_SOURCE_ITEM_COLUMNS = `
@@ -755,9 +755,9 @@ export class PostgresRuntimeStore
         `
           INSERT INTO source_runs (
             id, run_id, source_id, source_url_fingerprint, attempt, status,
-            item_count, error, started_at, finished_at, created_at
+            item_count, disposition, error, started_at, finished_at, created_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $9)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11, $10)
           RETURNING ${SOURCE_RUN_COLUMNS}
         `,
         [
@@ -768,6 +768,7 @@ export class PostgresRuntimeStore
           attempt,
           input.status,
           input.itemCount,
+          encodeJson(input.disposition),
           input.error === null ? null : encodeJson(input.error),
           input.startedAt,
           input.finishedAt,
@@ -1374,6 +1375,7 @@ function mapSourceRun(row: SourceRunRow): SourceRunRecord {
     attempt: row.attempt,
     status: row.status,
     itemCount: row.item_count,
+    disposition: row.disposition,
     error: row.error,
     startedAt: timestamp(row.started_at),
     finishedAt: timestamp(row.finished_at),
@@ -1650,6 +1652,7 @@ interface SourceRunRow extends QueryResultRow {
   attempt: number;
   status: SourceRunStatus;
   item_count: number;
+  disposition: JsonObject | null;
   error: SerializedError | null;
   started_at: Date | string;
   finished_at: Date | string;

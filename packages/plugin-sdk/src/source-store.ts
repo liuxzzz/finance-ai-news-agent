@@ -32,15 +32,26 @@ export interface RecordSourceCollectionInput {
   sourceUrlFingerprint: string;
   status: SourceRunStatus;
   itemCount: number;
+  /**
+   * Plugin-defined collection outcome. RSS stores counts that separate an empty
+   * feed, a failed request, and items dropped before use. `itemCount` remains the
+   * normalized count and still includes items outside the age window.
+   */
+  disposition: JsonObject;
   error: SerializedError | null;
   startedAt: string;
   finishedAt: string;
   items: RawSourceItemInput[];
 }
 
-export interface SourceRunRecord extends Omit<RecordSourceCollectionInput, "items"> {
+export interface SourceRunRecord extends Omit<
+  RecordSourceCollectionInput,
+  "items" | "disposition"
+> {
   attempt: number;
   createdAt: string;
+  /** Null for rows written before collection outcomes were stored. */
+  disposition: JsonObject | null;
 }
 
 /** Durable audit boundary for source fetches and their raw parsed items. */

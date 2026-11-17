@@ -24,6 +24,7 @@
     "schedule": "pnpm build && node --env-file-if-exists=.env.local --env-file-if-exists=.env.feishu.local apps/cli/dist/index.js schedule",
     "health": "pnpm build && node --env-file-if-exists=.env.local --env-file-if-exists=.env.feishu.local apps/cli/dist/index.js health",
     "metrics": "pnpm build && node --env-file-if-exists=.env.local --env-file-if-exists=.env.feishu.local apps/cli/dist/index.js metrics",
+    "diagnose-sources": "pnpm build && node apps/cli/dist/index.js diagnose-sources",
     "studio": "langgraphjs dev",
     "test": "pnpm --recursive --if-present run test",
     "typecheck": "pnpm --recursive --if-present run typecheck"
