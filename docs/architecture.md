@@ -83,7 +83,7 @@ apps  ──────>  core  ──────>  plugin-sdk
 - Core 和公共契约不绑定“金融 + AI”主题，领域配置最终应放入 Preset 和 Prompt。
 
 当前 `storage-postgres` 已实现 Plugin SDK 的 `RuntimeStore` 和 Model Call Ledger；`source-rss`
-已实现 RSS 拉取、缓存、跨源容错、去重、相关度/时间排序和 Evidence 标准化。`source-mcp` 作为
+已实现 RSS 拉取、缓存、跨源容错、去重、相关度/时间排序、Evidence 标准化，以及可离线复现的采集诊断。`source-mcp` 作为
 可选外部工具适配器保留，不进入默认实时链路。长期记忆的 `MemoryPort` 仍无实现。
 
 ## 3. Agent Graph
@@ -247,11 +247,12 @@ Research Provider。模型只产生 `search_news` 的关键词与数量；Gatewa
 
 ### 7.1 `apps/cli`
 
-- `src/index.ts`：解析 `demo`、`migrate`、`run`、`run-ai`、`run-live` 和 `status` 命令；
+- `src/index.ts`：解析 `demo`、`migrate`、`run`、`run-ai`、`run-live`、`status` 和 `diagnose-sources` 命令；
 - `src/demo.ts`：组装内存 Runtime、运行 Agent Graph 并输出 Markdown；
 - `src/runtime-command.ts`：组装 PostgreSQL Runtime、迁移、持久化执行和审计查询；
 - `src/ai-runtime-command.ts`：安全读取 DeepSeek 配置并组装结构化模型回放 Run；
 - `src/live-runtime-command.ts`：组装 DeepSeek Function Calling、RSS Gateway 和实时研究 Run；
+- `src/source-diagnosis-command.ts`：用本地 fixture 复现 RSS 采集诊断，不访问网络或数据库；
 - `src/replay-research.ts`：提供明确标注为合成数据的固定 Evidence；
 - `src/fixture-handlers.ts`：定义 Research、Curate & Write、Review 三个离线 Fixture Handler；
 - `src/studio-graph.ts`：导出供 LangGraph Studio 加载的无本地 checkpointer Graph；
@@ -288,7 +289,7 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
   DeepSeek Provider 实现 `StructuredModelProvider`；
 - `output-file`：确保目标目录存在后写入 UTF-8 文件，是当前唯一接入执行闭环的插件；
 - `source-rss`：直接读取受信配置中的 RSS Feed，提供内部只读 `search_news` 工具，并完成缓存、
-  跨源容错、去重、相关度/时间排序及 Evidence 标准化；
+  跨源容错、去重、相关度/时间排序、Evidence 标准化，以及空源、请求失败和条目过滤的采集诊断；
 - `source-mcp`：创建官方 MCP SDK `Client`，提供 Streamable HTTP 连接、显式工具白名单、JSON
   Schema 参数校验、超时与响应体限制；当前仅为可选适配器；
 - `storage-postgres`：提供 `PostgresRuntimeStore`、Model Call Ledger、session advisory lock、带
@@ -332,19 +333,19 @@ Core 是当前最主要的业务运行模块，但节点的具体行为通过 `A
 
 ## 8. 当前完成度与目标架构的差距
 
-| 能力                 | 当前状态                                  | 下一步接线位置                    |
-| -------------------- | ----------------------------------------- | --------------------------------- |
-| 三节点编排与有限修订 | 已实现                                    | 接入真实 `ModelProvider` Handler  |
-| 离线研究闭环         | 已实现                                    | `apps/cli/src/demo.ts`            |
-| 本地文件输出         | 已实现                                    | `plugins/output-file`             |
-| 真实模型调用         | DeepSeek 已组装并完成冒烟验收             | 增加评测基线与更多模型 Provider   |
-| RSS 新闻采集         | 默认三个综合 Feed，支持专业金融/AI 目录   | 增加 API 来源                     |
-| PostgreSQL Runtime   | Run/Stage、来源、内容、锁和恢复已实现     | 后续扩展语义记忆表                |
-| 长期记忆             | 已实现精确历史去重与 Story 事件进展时间线 | 增加向量检索、偏好与反馈          |
-| 业务 Prompt/Preset   | 目录占位                                  | `prompts/`、`presets/finance-ai/` |
-| 运行幂等、审计、恢复 | 已实现并通过真实 PostgreSQL 验收          | 继续扩展告警与基线对比            |
-| 飞书输出             | 已实现并完成真实发送与重复触发验收        | 增加交互卡片等可选渲染器          |
-| 调度、部署与观测     | launchd、Docker、health、metrics 已实现   | 增加云告警和托管部署示例          |
+| 能力                 | 当前状态                                                | 下一步接线位置                    |
+| -------------------- | ------------------------------------------------------- | --------------------------------- |
+| 三节点编排与有限修订 | 已实现                                                  | 接入真实 `ModelProvider` Handler  |
+| 离线研究闭环         | 已实现                                                  | `apps/cli/src/demo.ts`            |
+| 本地文件输出         | 已实现                                                  | `plugins/output-file`             |
+| 真实模型调用         | DeepSeek 已组装并完成冒烟验收                           | 增加评测基线与更多模型 Provider   |
+| RSS 新闻采集         | 默认三个综合 Feed，支持专业金融/AI 目录                 | 增加 API 来源                     |
+| PostgreSQL Runtime   | Run/Stage、来源、内容、锁和恢复已实现                   | 后续扩展语义记忆表                |
+| 长期记忆             | 已实现精确历史去重与 Story 事件进展时间线               | 增加向量检索、偏好与反馈          |
+| 业务 Prompt/Preset   | 目录占位                                                | `prompts/`、`presets/finance-ai/` |
+| 运行幂等、审计、恢复 | 已实现并通过真实 PostgreSQL 验收                        | 继续扩展告警与基线对比            |
+| 飞书输出             | 已实现并完成真实发送与重复触发验收                      | 增加交互卡片等可选渲染器          |
+| 调度、部署与观测     | health、metrics、离线来源诊断、launchd 和 Docker 已实现 | 增加云告警和托管部署示例          |
 
 在继续开发时，应优先保持现有边界：Core 只表达流程与领域状态，第三方能力通过 Plugin SDK
 接入，CLI/Runtime 负责组装，Preset 和 Prompt 负责领域差异。

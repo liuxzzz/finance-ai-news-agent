@@ -12,6 +12,19 @@ import type {
 import Parser from "rss-parser";
 import { z } from "zod";
 
+import {
+  collectionDisposition,
+  rssFeedDiagnosis,
+  summarizeCollectionDiagnosis,
+} from "./collection-diagnosis.js";
+import type { RssCollectionDiagnosis, RssFeedDiagnosis } from "./collection-diagnosis.js";
+
+export type {
+  RssCollectionDiagnosis,
+  RssCollectionOutcome,
+  RssFeedDiagnosis,
+} from "./collection-diagnosis.js";
+
 const TRACKING_PARAMETERS = new Set([
   "f",
   "from",
@@ -151,6 +164,7 @@ export class RssNewsGateway implements ToolGateway {
   private readonly generateId: () => string;
   private cache: { expiresAt: number; items: LoadedRssItem[] } | undefined;
   private loading: Promise<LoadedRssItem[]> | undefined;
+  private lastDiagnosis: RssCollectionDiagnosis | undefined;
 
   constructor(options: RssNewsGatewayOptions) {
     if (options.feeds.length === 0 || options.feeds.length > MAX_FEEDS) {
@@ -263,6 +277,31 @@ export class RssNewsGateway implements ToolGateway {
 
   clearCache(): void {
     this.cache = undefined;
+    this.lastDiagnosis = undefined;
+  }
+
+  /**
+   * Classify each configured feed with the same fetch, retry, normalize, and age
+   * window as `search_news`. This bypasses the feed cache. When a source audit
+   * store and runId are both present, it writes the same collection rows as a
+   * live fetch. `run-live` does not call this method.
+   */
+  async diagnose(context?: ToolExecutionContext): Promise<RssCollectionDiagnosis> {
+    this.clearCache();
+
+    try {
+      await this.loadItems(context?.runId);
+    } catch (error) {
+      if (this.lastDiagnosis === undefined) {
+        throw error;
+      }
+    }
+
+    if (this.lastDiagnosis === undefined) {
+      throw new Error("RSS collection diagnosis was not recorded.");
+    }
+
+    return this.lastDiagnosis;
   }
 
   private async loadItems(runId: string | undefined): Promise<LoadedRssItem[]> {
@@ -288,8 +327,12 @@ export class RssNewsGateway implements ToolGateway {
   }
 
   private async fetchItems(runId: string | undefined): Promise<LoadedRssItem[]> {
+    const dispositions: Array<RssFeedDiagnosis | undefined> = Array.from(
+      { length: this.feeds.length },
+      () => undefined,
+    );
     const results = await Promise.allSettled(
-      this.feeds.map(async (configuredFeed) => {
+      this.feeds.map(async (configuredFeed, index) => {
         const sourceRunId = this.generateId();
         const startedAt = new Date(this.now()).toISOString();
 
@@ -307,6 +350,18 @@ export class RssNewsGateway implements ToolGateway {
               ),
             )
             .filter((item): item is LoadedRssItem => item !== null);
+          const partitioned = partitionByAge(normalized, this.now(), this.maxItemAgeMs);
+          const diagnosis = rssFeedDiagnosis({
+            sourceId: configuredFeed.id,
+            received: feed.items.length,
+            normalized: normalized.length,
+            fresh: partitioned.fresh.length,
+            invalid: feed.items.length - normalized.length,
+            stale: partitioned.stale,
+            future: partitioned.future,
+            error: null,
+          });
+          dispositions[index] = diagnosis;
           const finishedAt = new Date(this.now()).toISOString();
 
           if (this.sourceAudit !== undefined && runId !== undefined) {
@@ -317,6 +372,7 @@ export class RssNewsGateway implements ToolGateway {
               sourceUrlFingerprint: fingerprint(configuredFeed.url),
               status: "succeeded",
               itemCount: normalized.length,
+              disposition: collectionDisposition(diagnosis),
               error: null,
               startedAt,
               finishedAt,
@@ -337,26 +393,36 @@ export class RssNewsGateway implements ToolGateway {
             });
           }
 
-          const now = this.now();
-          const earliest = now - this.maxItemAgeMs;
-          const latest = now + FUTURE_ITEM_SKEW_MS;
-          return normalized.filter(
-            (item) => item.publishedTime >= earliest && item.publishedTime <= latest,
-          );
+          return partitioned.fresh;
         } catch (error) {
-          if (this.sourceAudit !== undefined && runId !== undefined) {
-            await this.sourceAudit.recordSourceCollection({
-              id: sourceRunId,
-              runId,
+          if (dispositions[index] === undefined) {
+            const diagnosis = rssFeedDiagnosis({
               sourceId: configuredFeed.id,
-              sourceUrlFingerprint: fingerprint(configuredFeed.url),
-              status: "failed",
-              itemCount: 0,
-              error: serializeError(error),
-              startedAt,
-              finishedAt: new Date(this.now()).toISOString(),
-              items: [],
+              received: 0,
+              normalized: 0,
+              fresh: 0,
+              invalid: 0,
+              stale: 0,
+              future: 0,
+              error,
             });
+            dispositions[index] = diagnosis;
+
+            if (this.sourceAudit !== undefined && runId !== undefined) {
+              await this.sourceAudit.recordSourceCollection({
+                id: sourceRunId,
+                runId,
+                sourceId: configuredFeed.id,
+                sourceUrlFingerprint: fingerprint(configuredFeed.url),
+                status: "failed",
+                itemCount: 0,
+                disposition: collectionDisposition(diagnosis),
+                error: serializeError(error),
+                startedAt,
+                finishedAt: new Date(this.now()).toISOString(),
+                items: [],
+              });
+            }
           }
 
           throw error;
@@ -366,6 +432,21 @@ export class RssNewsGateway implements ToolGateway {
     const successful = results.filter(
       (result): result is PromiseFulfilledResult<LoadedRssItem[]> => result.status === "fulfilled",
     );
+    const diagnosed = dispositions.filter(
+      (diagnosis): diagnosis is RssFeedDiagnosis => diagnosis !== undefined,
+    );
+
+    if (diagnosed.length !== this.feeds.length) {
+      const firstFailure = results.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      throw firstFailure === undefined
+        ? new Error("RSS collection diagnosis missed a configured feed.")
+        : firstFailure.reason;
+    }
+
+    const deduped = dedupeFreshItems(successful.flatMap((result) => result.value));
+    this.lastDiagnosis = summarizeCollectionDiagnosis(diagnosed, deduped.length);
 
     if (successful.length === 0) {
       const firstFailure = results.find(
@@ -378,17 +459,7 @@ export class RssNewsGateway implements ToolGateway {
       );
     }
 
-    const byUrl = new Map<string, LoadedRssItem>();
-
-    for (const item of successful.flatMap((result) => result.value)) {
-      const existing = byUrl.get(item.url);
-
-      if (existing === undefined || item.publishedTime > existing.publishedTime) {
-        byUrl.set(item.url, item);
-      }
-    }
-
-    return [...byUrl.values()].sort((left, right) => right.publishedTime - left.publishedTime);
+    return deduped;
   }
 
   /**
@@ -528,6 +599,44 @@ function publishedTimestamp(item: ParsedRssItem): number | undefined {
   }
 
   return undefined;
+}
+
+function partitionByAge(
+  items: readonly LoadedRssItem[],
+  now: number,
+  maxItemAgeMs: number,
+): { fresh: LoadedRssItem[]; stale: number; future: number } {
+  const earliest = now - maxItemAgeMs;
+  const latest = now + FUTURE_ITEM_SKEW_MS;
+  const fresh: LoadedRssItem[] = [];
+  let stale = 0;
+  let future = 0;
+
+  for (const item of items) {
+    if (item.publishedTime < earliest) {
+      stale += 1;
+    } else if (item.publishedTime > latest) {
+      future += 1;
+    } else {
+      fresh.push(item);
+    }
+  }
+
+  return { fresh, stale, future };
+}
+
+function dedupeFreshItems(items: readonly LoadedRssItem[]): LoadedRssItem[] {
+  const byUrl = new Map<string, LoadedRssItem>();
+
+  for (const item of items) {
+    const existing = byUrl.get(item.url);
+
+    if (existing === undefined || item.publishedTime > existing.publishedTime) {
+      byUrl.set(item.url, item);
+    }
+  }
+
+  return [...byUrl.values()].sort((left, right) => right.publishedTime - left.publishedTime);
 }
 
 function normalizeItem(

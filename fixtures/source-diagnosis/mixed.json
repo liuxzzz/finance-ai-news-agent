@@ -1,0 +1,75 @@
+{
+  "now": "2026-08-04T12:00:00.000Z",
+  "maxItemAgeHours": 48,
+  "feeds": [
+    {
+      "id": "open-wire",
+      "name": "Open Wire",
+      "url": "https://open.invalid/feed",
+      "feed": {
+        "title": "Open Wire",
+        "items": [
+          {
+            "title": "Fresh AI market note",
+            "link": "https://open.invalid/fresh",
+            "isoDate": "2026-08-04T09:00:00.000Z",
+            "contentSnippet": "A fresh note"
+          },
+          {
+            "title": "Older note still audited",
+            "link": "https://open.invalid/stale",
+            "isoDate": "2026-07-01T09:00:00.000Z",
+            "contentSnippet": "Too old for the window"
+          }
+        ]
+      }
+    },
+    {
+      "id": "quiet-wire",
+      "name": "Quiet Wire",
+      "url": "https://quiet.invalid/feed",
+      "feed": {
+        "title": "Quiet Wire",
+        "items": []
+      }
+    },
+    {
+      "id": "filtered-wire",
+      "name": "Filtered Wire",
+      "url": "https://filtered.invalid/feed",
+      "feed": {
+        "title": "Filtered Wire",
+        "items": [
+          {
+            "title": "Old policy",
+            "link": "https://filtered.invalid/old",
+            "pubDate": "Mon, 01 Jun 2026 08:00:00 GMT"
+          },
+          {
+            "title": "Missing publication time",
+            "link": "https://filtered.invalid/undated",
+            "contentSnippet": "No isoDate or pubDate"
+          }
+        ]
+      }
+    },
+    {
+      "id": "future-wire",
+      "url": "https://future.invalid/feed",
+      "feed": {
+        "items": [
+          {
+            "title": "Clock is ahead",
+            "link": "https://future.invalid/ahead",
+            "isoDate": "2099-01-01T00:00:00.000Z"
+          }
+        ]
+      }
+    },
+    {
+      "id": "down-wire",
+      "url": "https://down.invalid/feed",
+      "error": "Status code 404"
+    }
+  ]
+}

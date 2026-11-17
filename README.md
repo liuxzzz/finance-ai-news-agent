@@ -156,6 +156,8 @@ pnpm run:live -- --report-date 2026-08-04 --edition daily --dry-run
 
 Feed 必须使用 HTTPS，本地 loopback 测试可以使用 HTTP。模型只能传入 `query` 与 `limit`，不能
 指定任意 URL。每个来源的成功、失败和原始条目分别写入 `source_runs` 与 `raw_source_items`。
+`source_runs.disposition` 另外记下该来源是有可用新闻、空源、条目被过滤，还是请求失败。
+`item_count` 仍是规范化后的条数，包含年龄窗口之外的条目。
 超时、连接中断以及 HTTP 429/502/503/504 会在短延迟后重试该 Feed 一次，审计只记录最终结果。
 候选内容会清理追踪参数、生成内容指纹、跨源聚类，并与最近 7 天成功 Run 比较后再均衡选取。审核通过的
 stories 会在独立的可恢复阶段与最近 30 天事件匹配，形成首次出现、最近更新和更新次数时间线。RSS
@@ -227,11 +229,28 @@ docker compose --profile worker run --rm agent
 ```bash
 pnpm health
 pnpm metrics -- --days 7
+pnpm diagnose-sources -- --fixture fixtures/source-diagnosis/mixed.json
+pnpm diagnose-sources -- --fixture fixtures/source-diagnosis/mixed.json --strict
 node --env-file-if-exists=.env.local --env-file-if-exists=.env.feishu.local \
   apps/cli/dist/index.js status <run-id>
 ```
 
-`status` 默认只输出脱敏摘要；追加 `--json` 才读取完整审计数据。
+`status` 默认只输出脱敏摘要；追加 `--json` 才读取完整审计数据。已写入 `disposition` 的来源在摘要里显示为 `sourceId:status:outcome`。没有该字段的旧行仍只显示 `sourceId:status`。
+
+`pnpm metrics` 在原有 `sources` 状态汇总之外增加 `sourceOutcomes`。迁移 007 之前的行记为 `unrecorded`。`sources[].items` 仍是 `item_count` 的合计，不会改成窗口内条数。需要先执行 `pnpm db:migrate`。
+
+`diagnose-sources` 只读取本地 JSON fixture，用与 `search_news` 相同的规范化、重试和年龄窗口给每个来源一个结果：
+
+| outcome          | 含义                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------- |
+| `available`      | 年龄窗口内至少有一条可用新闻                                                                |
+| `empty`          | 请求成功，但 Feed 里没有任何条目                                                            |
+| `filtered`       | Feed 有条目，但没有一条进入候选。`dropped` 分开统计无法规范化、过期和超出未来时钟偏差的数量 |
+| `request_failed` | 请求最终失败。瞬时失败仍只重试一次，报告里只有最终结果                                      |
+
+`dropped.invalid` 表示现有采集器无法规范化的条目，包含缺少标题、可用链接或可解析发布时间。发布时间按 `isoDate`、`pubDate`、`published`、`updated`、`dc:date`、`dcDate`、`date` 取第一个可解析的值；这些字段全部缺失或全部无法解析时，条目仍记为 invalid，采集时刻不会拿来填发布时间。Fixture 只接受采集器当前读取的字段：`title`、`link`、`guid`、`isoDate`、`pubDate`、`published`、`updated`、`dc:date`、`dcDate`、`date`、`contentSnippet`、`content`、`summary`。写上采集器不读取的字段会直接报错，而不会被静默忽略。
+
+默认打印 JSON 后退出码为 0，方便查看不健康来源。`--strict` 仍打印同一份 JSON，并在任一来源不是 `available` 时退出码为 1。命令不读取数据库、模型密钥、飞书 Webhook 或 `RSS_FEED_URLS`，也不访问 fixture 里的 URL。Fixture 的 `now` 和 `maxItemAgeHours` 决定窗口；省略 `now` 时使用当前时钟，省略 `maxItemAgeHours` 时使用 48。未来时间仍沿用采集器固定的 3 小时偏差。同一 URL 在多个来源出现时，每个来源仍按自己的条数分类，`summary.dedupedFreshItems` 才是去重后的候选数。
 
 ## Workspace
 
@@ -266,6 +285,7 @@ pnpm run:live     # 使用 DeepSeek Function Calling 和实时 RSS Evidence
 pnpm schedule     # 安装、检查或卸载每天自动任务
 pnpm health       # 检查数据库迁移和生产配置
 pnpm metrics      # 查看 Run、来源、模型和发送指标
+pnpm diagnose-sources -- --fixture <file>  # 离线区分空源、请求失败和被过滤条目
 pnpm studio        # 启动本地 Agent Server 和 Studio
 pnpm build         # 构建所有 workspace packages
 pnpm typecheck     # TypeScript 类型检查
@@ -293,6 +313,7 @@ pnpm check         # 完整 CI 检查
 - [x] 审核后 Story 事件匹配、跨日进展时间线和幂等更新
 - [x] 飞书机器人真实发送、20KB 门禁和 Runtime 发送幂等
 - [x] macOS 每日调度、失败退避、健康检查和运行指标
+- [x] 离线 RSS 来源诊断：区分空源、请求失败和被过滤条目
 - [x] Docker 一次性 Worker 部署入口
 - [x] 单元测试与 CI
 - [x] 36氪、虎嗅和 InfoQ RSS 真实网络拉取冒烟验收
