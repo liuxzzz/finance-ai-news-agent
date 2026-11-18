@@ -91,6 +91,12 @@ export interface ParsedRssItem {
   summary?: string;
 }
 
+interface AdaptedRssItem extends ParsedRssItem {
+  linkHrefs: readonly string[];
+  guidIsPermalink: boolean;
+  permalinkId?: string;
+}
+
 export interface ParsedRssFeed {
   title?: string;
   items: ParsedRssItem[];
@@ -104,7 +110,7 @@ export interface RssNewsGatewayOptions {
   maxExcerptChars?: number;
   minimumResultCount?: number;
   now?: () => number;
-  parseFeed?: (url: string) => Promise<ParsedRssFeed>;
+  parseFeed?: (url: string) => Promise<unknown>;
   retryDelayMs?: number;
   sleep?: (delayMs: number) => Promise<void>;
   sourceAudit?: SourceAuditStore;
@@ -215,14 +221,18 @@ export class RssNewsGateway implements ToolGateway {
     this.sourceAudit = options.sourceAudit;
     this.generateId = options.generateId ?? randomUUID;
 
+    let readFeed: (url: string) => Promise<unknown>;
+
     if (options.parseFeed !== undefined) {
-      this.parseFeed = options.parseFeed;
+      readFeed = options.parseFeed;
     } else {
       const parser = createRssParser(
         positiveInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, "timeoutMs"),
       );
-      this.parseFeed = async (url) => adaptParsedFeed(await parser.parseURL(url));
+      readFeed = (url) => parser.parseURL(url);
     }
+
+    this.parseFeed = async (url) => adaptParsedFeed(await readFeed(url));
   }
 
   async listTools(): Promise<ToolDescriptor[]> {
@@ -516,17 +526,35 @@ function createRssParser(timeoutMs: number): Parser {
     headers: { "User-Agent": RSS_USER_AGENT },
     timeout: timeoutMs,
     customFields: {
-      item: ["published", "updated", ["dc:date", "dcDate"], "dc:date", ["date", "elementDate"]],
+      item: [
+        "published",
+        "updated",
+        ["dc:date", "dcDate"],
+        "dc:date",
+        ["date", "elementDate"],
+        ["link", "rawLinks", { keepArray: true }],
+        ["guid", "rawGuid", { keepArray: true }],
+      ],
     },
   });
 }
 
+/**
+ * rss-parser 3.13 turns a lone Atom `<link href>` into a string, but `getLink`
+ * returns the first `rel=alternate` even when that target is `application/atom+xml`,
+ * and otherwise uses the first link. With no HTML alternate, that first link is
+ * often an audio or video enclosure. An RSS `<link href="...">` stays an object,
+ * and an XHTML `title` stays an object, so reading only strings drops the item.
+ * `rawLinks` and `rawGuid` keep the xml2js nodes from the custom fields above.
+ * A text-only `<link>https://...</link>` still throws inside rss-parser before
+ * this adapter runs.
+ */
 function adaptParsedFeed(value: unknown): ParsedRssFeed {
   if (!isRecord(value)) {
     return { items: [] };
   }
 
-  const title = readString(value.title);
+  const title = readXmlText(value.title);
   const items = Array.isArray(value.items) ? value.items.map((item) => adaptParsedItem(item)) : [];
   return {
     ...(title === undefined ? {} : { title }),
@@ -534,9 +562,9 @@ function adaptParsedFeed(value: unknown): ParsedRssFeed {
   };
 }
 
-function adaptParsedItem(value: unknown): ParsedRssItem {
+function adaptParsedItem(value: unknown): AdaptedRssItem {
   if (!isRecord(value)) {
-    return {};
+    return { linkHrefs: [], guidIsPermalink: true };
   }
 
   const literalDate = readString(value.elementDate);
@@ -544,11 +572,14 @@ function adaptParsedItem(value: unknown): ParsedRssItem {
     literalDate !== undefined && literalDate.trim().length > 0
       ? literalDate
       : readString(value.date);
+  const hrefs = selectArticleHrefs(value);
+  const guidInfo = readPermalinkGuid(value);
+  const permalinkId = readHttpIdentifier(value.id);
 
   return {
-    ...optionalText("title", readString(value.title)),
-    ...optionalText("link", readString(value.link)),
-    ...optionalText("guid", readString(value.guid)),
+    ...optionalText("title", readXmlText(value.title)),
+    ...optionalText("link", hrefs[0]),
+    ...optionalText("guid", guidInfo.guid),
     ...optionalText("pubDate", readString(value.pubDate)),
     ...optionalText("isoDate", readString(value.isoDate)),
     ...optionalText("published", readString(value.published)),
@@ -556,9 +587,12 @@ function adaptParsedItem(value: unknown): ParsedRssItem {
     ...optionalText("dc:date", readString(value["dc:date"])),
     ...optionalText("dcDate", readString(value.dcDate)),
     ...optionalText("date", date),
-    ...optionalText("contentSnippet", readString(value.contentSnippet)),
-    ...optionalText("content", readString(value.content)),
-    ...optionalText("summary", readString(value.summary)),
+    ...optionalText("contentSnippet", readXmlText(value.contentSnippet)),
+    ...optionalText("content", readXmlText(value.content)),
+    ...optionalText("summary", readXmlText(value.summary)),
+    linkHrefs: hrefs,
+    guidIsPermalink: guidInfo.permalink,
+    ...(permalinkId === undefined ? {} : { permalinkId }),
   };
 }
 
@@ -678,19 +712,287 @@ function normalizeItem(
 }
 
 function articleUrl(item: ParsedRssItem, feedUrl: string): URL | null {
-  const link = item.link?.trim();
+  const adapted = item as AdaptedRssItem;
+  const hrefs = adapted.linkHrefs ?? (item.link === undefined ? [] : [item.link]);
 
-  if (link !== undefined && link.length > 0) {
-    const resolved = safeHttpUrl(link, feedUrl);
+  for (const href of hrefs) {
+    const resolved = safeHttpUrl(href, feedUrl);
 
     if (resolved !== null) {
       return canonicalizeArticleUrl(resolved);
     }
   }
 
-  const guid = item.guid?.trim();
-  const guidUrl = guid === undefined || guid.length === 0 ? null : safeHttpUrl(guid);
-  return guidUrl === null ? null : canonicalizeArticleUrl(guidUrl);
+  if (adapted.guidIsPermalink !== false) {
+    const guid = item.guid?.trim();
+
+    if (guid !== undefined && guid.length > 0) {
+      const guidUrl = safeHttpUrl(guid);
+
+      if (guidUrl !== null) {
+        return canonicalizeArticleUrl(guidUrl);
+      }
+    }
+  }
+
+  const permalinkId = adapted.permalinkId?.trim();
+
+  if (permalinkId !== undefined && permalinkId.length > 0) {
+    const idUrl = safeHttpUrl(permalinkId);
+
+    if (idUrl !== null) {
+      return canonicalizeArticleUrl(idUrl);
+    }
+  }
+
+  return null;
+}
+
+interface LinkCandidate {
+  href: string;
+  rel?: string;
+  type?: string;
+}
+
+const AUDIO_VIDEO_EXTENSION = /\.(?:aac|m4a|m4v|mov|mp3|mp4|mpeg|mpg|ogg|opus|wav|webm)$/i;
+
+/**
+ * Rank http(s) article links before resolution. Missing `rel` counts as
+ * `alternate`. Audio and video links are skipped. Other enclosures stay last
+ * so a JPEG does not beat an HTML `related` link, and can still be used when
+ * nothing else resolves.
+ */
+function selectArticleHrefs(value: Record<string, unknown>): string[] {
+  const source =
+    Array.isArray(value.rawLinks) && value.rawLinks.length > 0 ? value.rawLinks : value.link;
+  const candidates: LinkCandidate[] = [];
+  collectLinkCandidates(source, candidates);
+  const ranked = candidates
+    .map((candidate, index) => ({ candidate, index, rank: articleLinkRank(candidate) }))
+    .filter(
+      (entry): entry is { candidate: LinkCandidate; index: number; rank: number } =>
+        entry.rank !== undefined,
+    )
+    .sort((left, right) => left.rank - right.rank || left.index - right.index);
+  const hrefs: string[] = [];
+
+  for (const entry of ranked) {
+    if (!hrefs.includes(entry.candidate.href)) {
+      hrefs.push(entry.candidate.href);
+    }
+  }
+
+  return hrefs;
+}
+
+function collectLinkCandidates(value: unknown, output: LinkCandidate[]): void {
+  if (typeof value === "string") {
+    const href = value.trim();
+
+    if (href.length > 0) {
+      output.push({ href });
+    }
+
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectLinkCandidates(entry, output);
+    }
+
+    return;
+  }
+
+  if (!isRecord(value)) {
+    return;
+  }
+
+  const attrs = isRecord(value.$) ? value.$ : value;
+  const href = readString(attrs.href)?.trim() || readString(value._)?.trim() || "";
+
+  if (href.length === 0) {
+    return;
+  }
+
+  const rel = readString(attrs.rel)?.trim().toLocaleLowerCase("en-US");
+  const type = readString(attrs.type)?.trim().toLocaleLowerCase("en-US");
+  output.push({
+    href,
+    ...(rel === undefined || rel.length === 0 ? {} : { rel }),
+    ...(type === undefined || type.length === 0 ? {} : { type }),
+  });
+}
+
+function articleLinkRank(candidate: LinkCandidate): number | undefined {
+  if (isAudioVideoLink(candidate)) {
+    return undefined;
+  }
+
+  const alternate = candidate.rel === undefined || candidate.rel === "alternate";
+
+  if (alternate && isArticleType(candidate.type)) {
+    return 0;
+  }
+
+  if (alternate) {
+    return 1;
+  }
+
+  if (candidate.rel !== "enclosure") {
+    return 2;
+  }
+
+  return 3;
+}
+
+function isAudioVideoLink(candidate: LinkCandidate): boolean {
+  const mime = candidate.type === undefined ? "" : mediaType(candidate.type);
+
+  if (mime.startsWith("audio/") || mime.startsWith("video/")) {
+    return true;
+  }
+
+  if (candidate.type !== undefined && isArticleType(candidate.type)) {
+    return false;
+  }
+
+  return audioVideoPath(candidate.href);
+}
+
+function isArticleType(type: string | undefined): boolean {
+  if (type === undefined) {
+    return true;
+  }
+
+  const mime = mediaType(type);
+  return mime === "text/html" || mime === "application/xhtml+xml" || mime === "text/plain";
+}
+
+function mediaType(type: string): string {
+  return type.split(";")[0]?.trim() ?? "";
+}
+
+function audioVideoPath(href: string): boolean {
+  const withoutFragment = href.split("#")[0] ?? href;
+  const withoutQuery = withoutFragment.split("?")[0] ?? withoutFragment;
+  return AUDIO_VIDEO_EXTENSION.test(withoutQuery.replace(/\/+$/u, ""));
+}
+
+function readPermalinkGuid(value: Record<string, unknown>): { guid?: string; permalink: boolean } {
+  const rawGuid = value.rawGuid;
+  const source = Array.isArray(rawGuid) ? rawGuid : value.guid;
+  const nodes = Array.isArray(source) ? source : [source];
+  let guid: string | undefined;
+  let permalink = true;
+  let sawPermalinkFlag = false;
+
+  for (const node of nodes) {
+    const parsed = readGuidNode(node);
+
+    if (parsed === undefined) {
+      continue;
+    }
+
+    if (guid === undefined && parsed.text !== undefined) {
+      guid = parsed.text;
+    }
+
+    if (parsed.permalink !== undefined && !sawPermalinkFlag) {
+      permalink = parsed.permalink;
+      sawPermalinkFlag = true;
+    }
+  }
+
+  if (guid === undefined) {
+    const direct = readString(value.guid)?.trim();
+
+    if (direct !== undefined && direct.length > 0) {
+      guid = direct;
+    }
+  }
+
+  return { ...(guid === undefined ? {} : { guid }), permalink };
+}
+
+function readGuidNode(value: unknown): { text?: string; permalink?: boolean } | undefined {
+  if (typeof value === "string") {
+    const text = value.trim();
+    return text.length === 0 ? undefined : { text };
+  }
+
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const attrs = isRecord(value.$) ? value.$ : value;
+  const flag = readString(attrs.isPermaLink)?.trim().toLocaleLowerCase("en-US");
+  const text = readString(value._)?.trim() ?? "";
+  const permalink = flag === "false" ? false : flag === "true" ? true : undefined;
+
+  if (text.length === 0 && permalink === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(text.length === 0 ? {} : { text }),
+    ...(permalink === undefined ? {} : { permalink }),
+  };
+}
+
+function readHttpIdentifier(value: unknown): string | undefined {
+  const text = readXmlText(value)?.trim();
+
+  if (text === undefined || text.length === 0 || safeHttpUrl(text) === null) {
+    return undefined;
+  }
+
+  return text;
+}
+
+function readXmlText(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  const parts: string[] = [];
+  collectXmlText(value, parts);
+  const text = parts
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0)
+    .join(" ");
+  return text.length === 0 ? undefined : text;
+}
+
+function collectXmlText(value: unknown, parts: string[]): void {
+  if (typeof value === "string") {
+    parts.push(value);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectXmlText(entry, parts);
+    }
+
+    return;
+  }
+
+  if (!isRecord(value)) {
+    return;
+  }
+
+  if (typeof value._ === "string") {
+    parts.push(value._);
+  }
+
+  for (const [key, entry] of Object.entries(value)) {
+    if (key === "$" || key === "_") {
+      continue;
+    }
+
+    collectXmlText(entry, parts);
+  }
 }
 
 function canonicalizeArticleUrl(url: URL): URL {

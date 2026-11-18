@@ -94,6 +94,62 @@ const ATOM_DATE_FEED = `<?xml version="1.0"?>
     <updated>2026-08-04T02:00:00.000Z</updated>
   </entry>
 </feed>`;
+const ATOM_LINK_FEED = `<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Atom links</title>
+  <entry>
+    <title type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml">AI <em>chips</em> &amp; rates</div></title>
+    <id>https://example.com/permalink</id>
+    <updated>2026-08-04T10:00:00.000Z</updated>
+    <link rel="self" type="application/atom+xml" href="https://example.com/feed/self"/>
+    <link rel="enclosure" type="audio/mpeg" href="https://cdn.example/ep.mp3" length="10"/>
+    <link rel="alternate" type="application/atom+xml" href="https://example.com/article.atom"/>
+    <link rel="alternate" type="text/html" href="https://example.com/article"/>
+    <content type="html">&lt;p&gt;Body &amp; more&lt;/p&gt;</content>
+  </entry>
+  <entry>
+    <title>Enclosure only</title>
+    <id>https://example.com/permalink-enc</id>
+    <updated>2026-08-04T09:00:00.000Z</updated>
+    <link rel="enclosure" type="video/mp4" href="https://cdn.example/only.mp4"/>
+  </entry>
+  <entry>
+    <title>Related beats image</title>
+    <id>tag:example,2026:img</id>
+    <updated>2026-08-04T08:30:00.000Z</updated>
+    <link rel="enclosure" type="image/jpeg" href="https://cdn.example/photo.jpg"/>
+    <link rel="related" type="text/html" href="https://example.com/related"/>
+  </entry>
+</feed>`;
+const RSS_LINK_FEED = `<?xml version="1.0"?>
+<rss version="2.0">
+  <channel>
+    <title>RSS links</title>
+    <item>
+      <title>Attribute link</title>
+      <link href="https://example.com/attr-link" rel="alternate"/>
+      <guid isPermaLink="false">https://example.com/not-permalink</guid>
+      <pubDate>Tue, 04 Aug 2026 11:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Article beats enclosure</title>
+      <link>https://example.com/rss-article</link>
+      <guid>https://example.com/rss-article</guid>
+      <enclosure url="https://cdn.example/rss.mp3" type="audio/mpeg" length="5"/>
+      <pubDate>Tue, 04 Aug 2026 10:30:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Non permalink guid</title>
+      <guid isPermaLink="false">https://example.com/secret</guid>
+      <pubDate>Tue, 04 Aug 2026 09:30:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Permalink guid</title>
+      <guid>https://example.com/default-guid</guid>
+      <pubDate>Tue, 04 Aug 2026 08:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>`;
 
 // Shapes produced by rss-parser 3.13, Node sockets, and fetch. See the retry
 // tests below for which of these are transient.
@@ -1287,6 +1343,199 @@ describe("RSS news gateway", () => {
         server.close((error) => (error ? reject(error) : resolve()));
       });
     }
+  });
+
+  it("keeps structured Atom and RSS links without using audio or video enclosures", async () => {
+    const server = createServer((request, response) => {
+      const body = request.url?.includes("atom") ? ATOM_LINK_FEED : RSS_LINK_FEED;
+      response.writeHead(200, {
+        "content-type": "application/rss+xml; charset=utf-8",
+        connection: "close",
+      });
+      response.end(body);
+    });
+
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+
+    if (address === null || typeof address === "string") {
+      throw new Error("RSS test server did not bind to a TCP port.");
+    }
+
+    try {
+      const audit = new RecordingSourceAudit();
+      const gateway = new RssNewsGateway({
+        feeds: [
+          { id: "rss", name: "RSS", url: `http://127.0.0.1:${address.port}/rss` },
+          { id: "atom", name: "Atom", url: `http://127.0.0.1:${address.port}/atom` },
+        ],
+        timeoutMs: 2_000,
+        now: () => FEED_NOW,
+        sourceAudit: audit,
+      });
+      const result = await gateway.callTool(
+        {
+          id: "parser-links",
+          name: "search_news",
+          arguments: { query: "unmatched", limit: 10 },
+        },
+        { runId: "run-parser-links" },
+      );
+      const items = (result.content as { items: Array<{ title: string; url: string }> }).items;
+      const ranked = await gateway.callTool({
+        id: "parser-links-rank",
+        name: "search_news",
+        arguments: { query: "chips", limit: 1 },
+      });
+      const rssItems = audit.collections.find((collection) => collection.sourceId === "rss")?.items;
+      const attribute = rssItems?.find((item) => item.title === "Attribute link");
+
+      expect(result.isError).toBe(false);
+      expect(items.map((item) => [item.title, item.url])).toEqual([
+        ["Attribute link", "https://example.com/attr-link"],
+        ["AI & rates chips", "https://example.com/article"],
+        ["Article beats enclosure", "https://example.com/rss-article"],
+        ["Enclosure only", "https://example.com/permalink-enc"],
+        ["Permalink guid", "https://example.com/default-guid"],
+        ["Related beats image", "https://example.com/related"],
+      ]);
+      expect(items.map((item) => item.url)).not.toContain("https://cdn.example/only.mp4");
+      expect(items.map((item) => item.url)).not.toContain("https://cdn.example/ep.mp3");
+      expect(items.map((item) => item.url)).not.toContain("https://example.com/article.atom");
+      expect(items.map((item) => item.url)).not.toContain("https://cdn.example/photo.jpg");
+      expect(items.map((item) => item.title)).not.toContain("Non permalink guid");
+      expect(ranked.content).toEqual({
+        items: [
+          expect.objectContaining({
+            title: "AI & rates chips",
+            url: "https://example.com/article",
+            excerpt: "Body & more",
+          }),
+        ],
+      });
+      expect(attribute).toEqual(
+        expect.objectContaining({
+          url: "https://example.com/attr-link",
+          externalId: "https://example.com/not-permalink",
+          raw: expect.objectContaining({
+            link: "https://example.com/attr-link",
+            guid: "https://example.com/not-permalink",
+          }),
+        }),
+      );
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
+  it("adapts injected object links and xml text instead of dropping the item", async () => {
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "structured", url: "https://36kr.com/feed" }],
+      now: () => FEED_NOW,
+      sourceAudit: audit,
+      parseFeed: async () => ({
+        title: { _: "Structured Feed", $: { type: "html" } },
+        items: [
+          {
+            title: { _: "Object title", $: { type: "html" } },
+            link: [
+              {
+                $: {
+                  rel: "enclosure",
+                  type: "audio/mpeg",
+                  href: "https://cdn.example/injected.mp3",
+                },
+              },
+              {
+                $: {
+                  rel: "alternate",
+                  type: "application/atom+xml",
+                  href: "https://example.com/injected.atom",
+                },
+              },
+              {
+                $: {
+                  rel: "alternate",
+                  type: "text/html",
+                  href: "https://example.com/injected",
+                },
+              },
+            ],
+            summary: { _: "Object summary", $: { type: "html" } },
+            isoDate: "2026-08-04T10:00:00.000Z",
+          },
+          {
+            title: { $: { type: "xhtml" }, div: [{ _: "Nested", em: ["title"] }] },
+            link: { $: { href: "/p/object-relative", rel: "alternate" } },
+            guid: { _: "https://example.com/ignored-guid", $: { isPermaLink: "false" } },
+            isoDate: "2026-08-04T09:00:00.000Z",
+          },
+          {
+            title: "Enclosure object falls back",
+            link: {
+              href: "https://cdn.example/only.mp3",
+              rel: "enclosure",
+              type: "audio/mpeg",
+            },
+            guid: "https://example.com/object-guid",
+            isoDate: "2026-08-04T08:00:00.000Z",
+          },
+          {
+            title: "Content object",
+            link: "https://example.com/content-object",
+            content: { _: "<p>Content body</p>", $: { type: "html" } },
+            isoDate: "2026-08-04T07:00:00.000Z",
+          },
+          {
+            title: "Plain string still works",
+            link: "https://example.com/plain",
+            isoDate: "2026-08-04T06:00:00.000Z",
+          },
+        ],
+      }),
+    });
+
+    const result = await gateway.callTool(
+      {
+        id: "structured-links",
+        name: "search_news",
+        arguments: { query: "unmatched", limit: 10 },
+      },
+      { runId: "run-structured-links" },
+    );
+    const items = (
+      result.content as {
+        items: Array<{ title: string; url: string; source: string; excerpt: string }>;
+      }
+    ).items;
+    const relative = audit.collections[0]?.items.find((item) => item.title === "Nested title");
+
+    expect(items.map((item) => [item.title, item.url, item.excerpt])).toEqual([
+      ["Object title", "https://example.com/injected", "Object summary"],
+      ["Nested title", "https://36kr.com/p/object-relative", "Nested title"],
+      [
+        "Enclosure object falls back",
+        "https://example.com/object-guid",
+        "Enclosure object falls back",
+      ],
+      ["Content object", "https://example.com/content-object", "Content body"],
+      ["Plain string still works", "https://example.com/plain", "Plain string still works"],
+    ]);
+    expect(items.every((item) => item.source === "Structured Feed")).toBe(true);
+    expect(items.map((item) => item.url)).not.toContain("https://cdn.example/injected.mp3");
+    expect(items.map((item) => item.url)).not.toContain("https://example.com/injected.atom");
+    expect(relative).toEqual(
+      expect.objectContaining({
+        externalId: "https://example.com/ignored-guid",
+        url: "https://36kr.com/p/object-relative",
+      }),
+    );
   });
 });
 

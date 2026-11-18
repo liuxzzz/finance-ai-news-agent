@@ -159,6 +159,7 @@ Feed 必须使用 HTTPS，本地 loopback 测试可以使用 HTTP。模型只能
 `source_runs.disposition` 另外记下该来源是有可用新闻、空源、条目被过滤，还是请求失败。
 `item_count` 仍是规范化后的条数，包含年龄窗口之外的条目。
 超时、连接中断以及 HTTP 429/502/503/504 会在短延迟后重试该 Feed 一次，审计只记录最终结果。
+同一条目有多个链接时，优先使用 `rel=alternate` 的 HTML 文章地址，其次才是其他 http(s) 链接；音频和视频 enclosure 不会当作文章 URL。`isPermaLink="false"` 的 guid 只保留为外部 ID，http(s) 形式的 Atom `id` 只在前面都没有可用地址时用作链接。xml2js 写成对象的标题、摘要和正文会先抽成文本，再参与关键词排序。
 候选内容会清理追踪参数、生成内容指纹、跨源聚类，并与最近 7 天成功 Run 比较后再均衡选取。审核通过的
 stories 会在独立的可恢复阶段与最近 30 天事件匹配，形成首次出现、最近更新和更新次数时间线。RSS
 条目会被转换成以下结构后才可进入 Agent Evidence：
@@ -248,7 +249,7 @@ node --env-file-if-exists=.env.local --env-file-if-exists=.env.feishu.local \
 | `filtered`       | Feed 有条目，但没有一条进入候选。`dropped` 分开统计无法规范化、过期和超出未来时钟偏差的数量 |
 | `request_failed` | 请求最终失败。瞬时失败仍只重试一次，报告里只有最终结果                                      |
 
-`dropped.invalid` 表示现有采集器无法规范化的条目，包含缺少标题、可用链接或可解析发布时间。发布时间按 `isoDate`、`pubDate`、`published`、`updated`、`dc:date`、`dcDate`、`date` 取第一个可解析的值；这些字段全部缺失或全部无法解析时，条目仍记为 invalid，采集时刻不会拿来填发布时间。Fixture 只接受采集器当前读取的字段：`title`、`link`、`guid`、`isoDate`、`pubDate`、`published`、`updated`、`dc:date`、`dcDate`、`date`、`contentSnippet`、`content`、`summary`。写上采集器不读取的字段会直接报错，而不会被静默忽略。
+`dropped.invalid` 表示现有采集器无法规范化的条目，包含缺少标题、可用链接或可解析发布时间。发布时间按 `isoDate`、`pubDate`、`published`、`updated`、`dc:date`、`dcDate`、`date` 取第一个可解析的值；这些字段全部缺失或全部无法解析时，条目仍记为 invalid，采集时刻不会拿来填发布时间。实时解析会按上一节的规则从结构化 `link` 里选择文章 URL，并接受对象形式的标题、摘要和正文。Fixture 仍只接受字符串字段：`title`、`link`、`guid`、`isoDate`、`pubDate`、`published`、`updated`、`dc:date`、`dcDate`、`date`、`contentSnippet`、`content`、`summary`。写上采集器不读取的字段会直接报错，而不会被静默忽略。
 
 默认打印 JSON 后退出码为 0，方便查看不健康来源。`--strict` 仍打印同一份 JSON，并在任一来源不是 `available` 时退出码为 1。命令不读取数据库、模型密钥、飞书 Webhook 或 `RSS_FEED_URLS`，也不访问 fixture 里的 URL。Fixture 的 `now` 和 `maxItemAgeHours` 决定窗口；省略 `now` 时使用当前时钟，省略 `maxItemAgeHours` 时使用 48。未来时间仍沿用采集器固定的 3 小时偏差。同一 URL 在多个来源出现时，每个来源仍按自己的条数分类，`summary.dedupedFreshItems` 才是去重后的候选数。
 
