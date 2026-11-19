@@ -12,6 +12,7 @@ import type {
 import Parser from "rss-parser";
 import { z } from "zod";
 
+import { installAtomFeedTolerance } from "./atom-feed-tolerance.js";
 import {
   collectionDisposition,
   rssFeedDiagnosis,
@@ -522,6 +523,7 @@ export function validateRssFeedUrl(value: string): URL {
  * already consumed.
  */
 function createRssParser(timeoutMs: number): Parser {
+  installAtomFeedTolerance();
   return new Parser({
     headers: { "User-Agent": RSS_USER_AGENT },
     timeout: timeoutMs,
@@ -546,8 +548,9 @@ function createRssParser(timeoutMs: number): Parser {
  * often an audio or video enclosure. An RSS `<link href="...">` stays an object,
  * and an XHTML `title` stays an object, so reading only strings drops the item.
  * `rawLinks` and `rawGuid` keep the xml2js nodes from the custom fields above.
- * A text-only `<link>https://...</link>` still throws inside rss-parser before
- * this adapter runs.
+ * RSS text `<link>` nodes already arrive as strings. Atom text, CDATA, and
+ * empty `<link>` nodes are normalized before `getLink`, so one of them does
+ * not reject the feed before this adapter runs.
  */
 function adaptParsedFeed(value: unknown): ParsedRssFeed {
   if (!isRecord(value)) {

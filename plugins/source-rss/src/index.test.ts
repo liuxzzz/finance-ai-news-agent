@@ -150,6 +150,72 @@ const RSS_LINK_FEED = `<?xml version="1.0"?>
     </item>
   </channel>
 </rss>`;
+// rss-parser 3.13 throws on these Atom shapes before any item is returned:
+// text, CDATA, whitespace, and empty <link> nodes hit getLink's $.rel, and a
+// bare unparseable <published> or <updated> calls Date.toISOString.
+const ATOM_TOLERANCE_FEED = `<?xml version="1.0"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Tolerant Atom</title>
+  <link>https://example.com/site</link>
+  <entry>
+    <title>Href control</title>
+    <id>https://example.com/href</id>
+    <updated>2026-08-04T11:00:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://example.com/href"/>
+  </entry>
+  <entry>
+    <title>Text link</title>
+    <id>urn:text</id>
+    <updated>2026-08-04T10:00:00Z</updated>
+    <link>https://example.com/text</link>
+  </entry>
+  <entry>
+    <title>CDATA link</title>
+    <id>urn:cdata</id>
+    <updated>2026-08-04T09:30:00Z</updated>
+    <link><![CDATA[https://example.com/cdata]]></link>
+  </entry>
+  <entry>
+    <title>Whitespace link</title>
+    <id>urn:ws</id>
+    <updated>2026-08-04T09:00:00Z</updated>
+    <link>
+      https://example.com/whitespace
+    </link>
+  </entry>
+  <entry>
+    <title>Text before enclosure</title>
+    <id>urn:mix</id>
+    <updated>2026-08-04T08:30:00Z</updated>
+    <link>https://example.com/mixed-text</link>
+    <link rel="enclosure" type="audio/mpeg" href="https://cdn.example/mixed.mp3"/>
+  </entry>
+  <entry>
+    <title>Empty link uses id</title>
+    <id>https://example.com/empty-id</id>
+    <updated>2026-08-04T08:00:00Z</updated>
+    <link></link>
+  </entry>
+  <entry>
+    <title>Bad published keeps updated</title>
+    <id>urn:dates</id>
+    <published>not-a-date</published>
+    <updated>2026-08-04T07:00:00Z</updated>
+    <link href="https://example.com/recovered-date"/>
+  </entry>
+  <entry>
+    <title>Blank updated dropped</title>
+    <id>urn:blank</id>
+    <updated>   </updated>
+    <link href="https://example.com/blank-date"/>
+  </entry>
+  <entry>
+    <title>Relative text link</title>
+    <id>urn:rel</id>
+    <updated>2026-08-04T06:00:00Z</updated>
+    <link>/p/relative-atom</link>
+  </entry>
+</feed>`;
 
 // Shapes produced by rss-parser 3.13, Node sockets, and fetch. See the retry
 // tests below for which of these are transient.
@@ -1536,6 +1602,83 @@ describe("RSS news gateway", () => {
         url: "https://36kr.com/p/object-relative",
       }),
     );
+  });
+
+  it("keeps the rest of an Atom feed when a text link or unparseable date would abort rss-parser", async () => {
+    const server = createServer((request, response) => {
+      const body = request.url?.includes("atom") ? ATOM_TOLERANCE_FEED : "";
+      response.writeHead(body.length === 0 ? 404 : 200, {
+        "content-type": "application/atom+xml; charset=utf-8",
+        connection: "close",
+      });
+      response.end(body);
+    });
+
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+
+    if (address === null || typeof address === "string") {
+      throw new Error("RSS test server did not bind to a TCP port.");
+    }
+
+    try {
+      const audit = new RecordingSourceAudit();
+      const gateway = new RssNewsGateway({
+        feeds: [{ id: "atom", name: "Atom", url: `http://127.0.0.1:${address.port}/atom` }],
+        timeoutMs: 2_000,
+        now: () => FEED_NOW,
+        sourceAudit: audit,
+      });
+      const result = await gateway.callTool(
+        {
+          id: "parser-atom-tolerance",
+          name: "search_news",
+          arguments: { query: "unmatched", limit: 20 },
+        },
+        { runId: "run-parser-atom-tolerance" },
+      );
+      const items = (result.content as { items: Array<{ title: string; url: string }> }).items;
+      const recovered = audit.collections[0]?.items.find(
+        (item) => item.title === "Bad published keeps updated",
+      );
+
+      expect(result.isError).toBe(false);
+      expect(items.map((item) => [item.title, item.url])).toEqual([
+        ["Href control", "https://example.com/href"],
+        ["Text link", "https://example.com/text"],
+        ["CDATA link", "https://example.com/cdata"],
+        ["Whitespace link", "https://example.com/whitespace"],
+        ["Text before enclosure", "https://example.com/mixed-text"],
+        ["Empty link uses id", "https://example.com/empty-id"],
+        ["Bad published keeps updated", "https://example.com/recovered-date"],
+        ["Relative text link", `http://127.0.0.1:${address.port}/p/relative-atom`],
+      ]);
+      expect(items.map((item) => item.url)).not.toContain("https://cdn.example/mixed.mp3");
+      expect(items.map((item) => item.title)).not.toContain("Blank updated dropped");
+      expect(audit.collections[0]).toEqual(
+        expect.objectContaining({
+          status: "succeeded",
+          itemCount: 8,
+          error: null,
+          disposition: {
+            outcome: "available",
+            received: 9,
+            normalized: 8,
+            fresh: 8,
+            dropped: { invalid: 1, stale: 0, future: 0 },
+          },
+        }),
+      );
+      expect(recovered?.publishedAt).toBe("2026-08-04T07:00:00.000Z");
+      expect(JSON.stringify(recovered?.raw)).not.toContain("not-a-date");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
   });
 });
 
