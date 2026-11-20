@@ -44,7 +44,7 @@ TOPIC_DESK_STUB_FAILURES=1
 
 这个计数只在 e2e 模式生效，让本地 stub 按次数失败，用来验证失败记录和后续恢复。它不是线上模型的故障。
 
-PostgreSQL 不可达时，迁移测试和端到端测试会跳过。设置 `TOPIC_DESK_REQUIRE_POSTGRES=1` 后，连不上数据库会直接失败。
+PostgreSQL 不可达时，迁移测试和端到端测试会跳过。设置 `TOPIC_DESK_REQUIRE_POSTGRES=1` 后，连不上数据库会直接失败。GitHub Actions 会启动 PostgreSQL，并设置该变量，因此这两项测试在 CI 中必须执行。
 
 ## 局限
 
