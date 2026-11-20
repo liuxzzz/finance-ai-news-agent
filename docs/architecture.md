@@ -195,6 +195,14 @@ Run 的硬请求上限。
 Research Provider。模型只产生 `search_news` 的关键词与数量；Gateway 从应用配置的 Feed 拉取新闻，
 并将 RSS 条目标准化为 Evidence。模型不能指定 Feed URL，也不能生成或替换来源 URL。
 
+### 5.1 专题工作台
+
+`topic-desk` 不复制每日 Agent Graph。它保存用户专题，然后调用同一个 `RssNewsGateway` 做采集诊断和
+`search_news`，再用 Core 里的证据标准化、聚类和来源均衡去掉重复。命中的新证据才会进入简报模型。
+默认模型是 `LocalStubBriefingModel`，输出标明 `local-stub/topic-desk-stub@1`。显式 live 模式才组装
+现有 DeepSeek structured provider，并复用 `renderCuratedDraft` 生成来源链接。专题运行写入
+`topics`、`topic_runs`、`topic_briefings` 和 `topic_seen_evidence`，不占用每日 `runs` 身份，也不发送通知。
+
 ## 6. Plugin SDK
 
 `packages/plugin-sdk` 是 Core 与外部实现之间的稳定协议层，公共类型不暴露第三方框架类型。
@@ -247,7 +255,9 @@ Research Provider。模型只产生 `search_news` 的关键词与数量；Gatewa
 
 ### 7.1 `apps/cli`
 
-- `src/index.ts`：解析 `demo`、`migrate`、`run`、`run-ai`、`run-live`、`status` 和 `diagnose-sources` 命令；
+- `src/index.ts`：解析 `demo`、`migrate`、`run`、`run-ai`、`run-live`、`status`、`diagnose-sources` 和 `topic-desk` 命令；
+- `src/topic-desk-command.ts`：组装 PostgreSQL 专题存储、RSS 采集和简报模型，并只在回环地址启动工作台；
+- `src/topic-desk-collector.ts`：用现有 `RssNewsGateway` 的 `diagnose` 与 `search_news` 为专题取新闻；
 - `src/demo.ts`：组装内存 Runtime、运行 Agent Graph 并输出 Markdown；
 - `src/runtime-command.ts`：组装 PostgreSQL Runtime、迁移、持久化执行和审计查询；
 - `src/ai-runtime-command.ts`：安全读取 DeepSeek 配置并组装结构化模型回放 Run；

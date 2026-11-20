@@ -11,6 +11,7 @@ import {
 import { diagnoseSources } from "./source-diagnosis-command.js";
 import { migrateDatabase, runPersistentFixture, showRunStatus } from "./runtime-command.js";
 import { manageDailySchedule } from "./scheduler-command.js";
+import { serveTopicDesk } from "./topic-desk-command.js";
 
 const command = process.argv[2] ?? "help";
 
@@ -35,6 +36,8 @@ try {
     await showOperationalMetrics(process.argv.slice(3));
   } else if (command === "diagnose-sources") {
     await diagnoseSources(process.argv.slice(3));
+  } else if (command === "topic-desk") {
+    await serveTopicDesk(process.argv.slice(3));
   } else if (command === "notify-failure") {
     await notifyScheduledFailure(process.argv.slice(3));
   } else {
@@ -61,6 +64,7 @@ function printHelp(): void {
       "  finance-ai-news-agent health               Check database and production configuration",
       "  finance-ai-news-agent metrics [--days 7]   Show recent operational metrics",
       "  finance-ai-news-agent diagnose-sources     Classify a local RSS fixture",
+      "  finance-ai-news-agent topic-desk         Serve the local topic desk",
       "",
       "Run options:",
       "  --tenant <id>              Default: default",
@@ -79,6 +83,10 @@ function printHelp(): void {
       "  diagnose-sources --fixture <file> [--strict]",
       "  Local JSON only. Does not fetch feeds, use the database, or send messages.",
       "  Exit 0 by default. --strict exits 1 unless every feed outcome is available.",
+      "",
+      "Topic desk:",
+      "  topic-desk serve [--host 127.0.0.1] [--port 4173]",
+      "  Loopback only. Default TOPIC_DESK_MODE=e2e uses the local stub model and does not notify.",
       "",
     ].join("\n"),
   );

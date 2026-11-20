@@ -240,6 +240,17 @@ node --env-file-if-exists=.env.local --env-file-if-exists=.env.feishu.local \
 
 `pnpm metrics` 在原有 `sources` 状态汇总之外增加 `sourceOutcomes`。迁移 007 之前的行记为 `unrecorded`。`sources[].items` 仍是 `item_count` 的合计，不会改成窗口内条数。需要先执行 `pnpm db:migrate`。
 
+### 专题追踪与简报工作台
+
+工作台把现有 RSS 采集、证据去重和简报导出做成可保存的专题。它只监听本机回环地址，默认 `TOPIC_DESK_MODE=e2e`：使用明确标注的本地 stub 模型，不调用付费模型，也不发送飞书或其它通知。专题、运行和简报写入 PostgreSQL，迁移为 `008_topic_desk.sql`，不改每日 `runs` 的身份。
+
+```bash
+export DATABASE_URL=postgresql://agent:agent@127.0.0.1:5432/finance_ai_news
+pnpm topic-desk -- serve --host 127.0.0.1 --port 4173
+```
+
+浏览器打开终端打印的 `http://127.0.0.1:4173`。使用方式、故障注入和未验证边界见 [专题工作台](docs/topic-desk.md)。
+
 `diagnose-sources` 只读取本地 JSON fixture，用与 `search_news` 相同的规范化、重试和年龄窗口给每个来源一个结果：
 
 | outcome          | 含义                                                                                        |
@@ -287,6 +298,7 @@ pnpm schedule     # 安装、检查或卸载每天自动任务
 pnpm health       # 检查数据库迁移和生产配置
 pnpm metrics      # 查看 Run、来源、模型和发送指标
 pnpm diagnose-sources -- --fixture <file>  # 离线区分空源、请求失败和被过滤条目
+pnpm topic-desk                       # 启动本地专题追踪与简报工作台
 pnpm studio        # 启动本地 Agent Server 和 Studio
 pnpm build         # 构建所有 workspace packages
 pnpm typecheck     # TypeScript 类型检查
@@ -315,6 +327,7 @@ pnpm check         # 完整 CI 检查
 - [x] 飞书机器人真实发送、20KB 门禁和 Runtime 发送幂等
 - [x] macOS 每日调度、失败退避、健康检查和运行指标
 - [x] 离线 RSS 来源诊断：区分空源、请求失败和被过滤条目
+- [x] 专题追踪与简报工作台：专题配置、RSS 采集、去重、本地 stub 简报、历史和导出
 - [x] Docker 一次性 Worker 部署入口
 - [x] 单元测试与 CI
 - [x] 36氪、虎嗅和 InfoQ RSS 真实网络拉取冒烟验收
