@@ -10,3 +10,4 @@ export {
 } from "./checkpointer.js";
 export { runPostgresMigrations, type RunPostgresMigrationsOptions } from "./migrations.js";
 export { PostgresRuntimeStore, storyHeadlineSimilarity } from "./runtime-store.js";
+export { PostgresTopicDeskStore } from "./topic-desk-store.js";
