@@ -80,6 +80,26 @@ export {
 } from "./run-executor.js";
 
 export {
+  LocalStubBriefingModel,
+  TopicCollectionFailedError,
+  TopicDesk,
+  TopicDeskError,
+  assertTopicFeedUrl,
+  createStructuredTopicBriefingModel,
+  normalizeTopicDraft,
+  type TopicBriefingDraft,
+  type TopicBriefingExporter,
+  type TopicBriefingModel,
+  type TopicCollectedItem,
+  type TopicDeskDetail,
+  type TopicDeskOptions,
+  type TopicDraftInput,
+  type TopicNewsCollector,
+} from "./topic-desk.js";
+
+export { InMemoryTopicDeskStore } from "./topic-desk-memory.js";
+
+export {
   NewsToolResultSchema,
   createToolCallingResearchProvider,
   type CreateToolCallingResearchOptions,

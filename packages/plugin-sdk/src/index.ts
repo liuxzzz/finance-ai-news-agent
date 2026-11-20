@@ -183,6 +183,25 @@ export interface OutputPlugin {
 }
 
 export {
+  TopicRunAlreadyActiveError,
+  type BeginTopicRunInput,
+  type CommitTopicRunInput,
+  type CreateTopicInput,
+  type TopicBriefingRecord,
+  type TopicDeskStore,
+  type TopicEvidenceRecord,
+  type TopicFeed,
+  type TopicRecord,
+  type TopicRunOutcome,
+  type TopicRunRecord,
+  type TopicRunStatus,
+  type TopicSeenEvidenceRecord,
+  type TopicSourceOutcome,
+  type TopicSourceOutcomeKind,
+  type UpdateTopicInput,
+} from "./topic-desk-store.js";
+
+export {
   DeliveryStatusSchema,
   RunStageStatusSchema,
   RunStatusSchema,

@@ -11,6 +11,23 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: agent
+          POSTGRES_PASSWORD: agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TOPIC_DESK_REQUIRE_POSTGRES: "1"
+      TOPIC_DESK_ADMIN_URL: postgresql://agent:agent@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
 
