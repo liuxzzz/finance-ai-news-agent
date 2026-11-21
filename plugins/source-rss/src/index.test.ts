@@ -220,10 +220,17 @@ const ATOM_TOLERANCE_FEED = `<?xml version="1.0"?>
 // Shapes produced by rss-parser 3.13, Node sockets, and fetch. See the retry
 // tests below for which of these are transient.
 const TRANSIENT_FEED_FAILURES = [
+  { label: "HTTP 408", failure: new Error("Status code 408") },
   { label: "HTTP 429", failure: new Error("Status code 429") },
+  { label: "HTTP 500", failure: new Error("Status code 500") },
   { label: "HTTP 502", failure: new Error("Status code 502") },
   { label: "HTTP 503", failure: new Error("Status code 503") },
   { label: "HTTP 504", failure: new Error("Status code 504") },
+  { label: "HTTP 520", failure: new Error("Status code 520") },
+  { label: "HTTP 521", failure: new Error("Status code 521") },
+  { label: "HTTP 522", failure: new Error("Status code 522") },
+  { label: "HTTP 523", failure: new Error("Status code 523") },
+  { label: "HTTP 524", failure: new Error("Status code 524") },
   {
     label: "status property 429",
     failure: Object.assign(new Error("rate limited"), { status: 429 }),
@@ -269,23 +276,50 @@ const TRANSIENT_FEED_FAILURES = [
       cause: withCode("connect ECONNREFUSED 127.0.0.1:443", "ECONNREFUSED"),
     }),
   },
+  {
+    label: "unclosed root",
+    failure: new Error("Unclosed root tag\nLine: 12\nColumn: 0\nChar: "),
+  },
+  {
+    label: "unclosed xml",
+    failure: new Error("Unclosed xml tag\nLine: 4\nColumn: 1\nChar: <"),
+  },
+  {
+    label: "unexpected close tag",
+    failure: new Error("Unexpected close tag\nLine: 2\nColumn: 3\nChar: >"),
+  },
+  { label: "no root element", failure: new Error("No root element found") },
+  {
+    label: "unexpected end",
+    failure: new Error("Unexpected end\nLine: 8\nColumn: 0\nChar: "),
+  },
 ];
 
 const NON_TRANSIENT_FEED_FAILURES = [
-  { label: "HTTP 404", failure: new Error("Status code 404") },
   { label: "HTTP 400", failure: new Error("Status code 400") },
-  { label: "HTTP 500", failure: new Error("Status code 500") },
+  { label: "HTTP 401", failure: new Error("Status code 401") },
+  { label: "HTTP 403", failure: new Error("Status code 403") },
+  { label: "HTTP 404", failure: new Error("Status code 404") },
+  { label: "HTTP 410", failure: new Error("Status code 410") },
   { label: "status property 404", failure: Object.assign(new Error("missing"), { status: 404 }) },
   { label: "redirect cap", failure: new Error("Too many redirects") },
   { label: "empty XML", failure: new Error("Unable to parse XML.") },
   { label: "unrecognized feed", failure: new Error("Feed not recognized as RSS 1 or 2.") },
   {
+    label: "unrecognized rss version",
+    failure: new Error("Default RSS version not recognized."),
+  },
+  {
     label: "xml2js syntax error",
     failure: new Error("Non-whitespace before first tag.\nLine: 0\nColumn: 1\nChar: <"),
   },
   {
-    label: "xml2js close tag",
-    failure: new Error("Unexpected close tag\nLine: 2\nColumn: 3\nChar: >"),
+    label: "invalid character",
+    failure: new Error("Invalid character in entity name\nLine: 1\nColumn: 4\nChar: &"),
+  },
+  {
+    label: "attribute without value",
+    failure: new Error("Attribute without value\nLine: 3\nColumn: 8\nChar: >"),
   },
   { label: "application error", failure: new Error("feed unavailable") },
 ];
@@ -707,18 +741,19 @@ describe("RSS news gateway", () => {
   });
 
   // rss-parser 3.13 parseURL does not set status or statusCode. HTTP failures
-  // are `Error` messages `Status code <n>` (retry only 429/502/503/504; other
-  // statuses, including 4xx and 500, are final). Timeouts are
+  // are `Error` messages `Status code <n>` (retry 408/429/500/502/503/504 and
+  // 520–524; other statuses, including 401/403/404/410, are final). Timeouts are
   // `Request timed out after <ms>ms`. Socket failures reject the Node error
   // (`ECONNRESET`, `ETIMEDOUT`, `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`,
   // `ECONNABORTED`, `ENETUNREACH`, `EHOSTUNREACH`, `EPIPE`, and undici
   // `UND_ERR_*` timeout/socket codes), matched from `code` or the message, or
   // an AbortError / TimeoutError / fetch TypeError. A code nested on `cause`
-  // still counts. XML parsing runs only after the response
-  // ends, so `Unable to parse XML.`, `Feed not recognized as RSS 1 or 2.`,
-  // xml2js syntax errors, and `Too many redirects` are not retried. A finished
-  // body that fails the parser stays non-transient even when the wording could
-  // also describe a short document. Other application errors are not retried.
+  // still counts. A body that stops before the root closes (`Unclosed root tag`,
+  // `Unclosed xml tag`, `Unexpected close tag`, `No root element`, `Unexpected end`)
+  // is retried once. `Unable to parse XML.`, `Feed not recognized as RSS 1 or 2.`,
+  // `Default RSS version not recognized.`, non-whitespace before the first tag,
+  // invalid characters, attributes without values, and `Too many redirects` are
+  // not retried. Other application errors are not retried.
   it.each(TRANSIENT_FEED_FAILURES)(
     "retries a transient $label once and then uses the feed",
     async ({ failure }) => {
@@ -806,6 +841,106 @@ describe("RSS news gateway", () => {
         error: null,
       }),
     ]);
+  });
+
+  it("audits one succeeded row when a truncated feed recovers on the single retry", async () => {
+    let attempts = 0;
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [{ id: "flaky", name: "Flaky", url: "https://flaky.example/feed" }],
+      now: () => FEED_NOW,
+      generateId: sequentialIds(),
+      sourceAudit: audit,
+      sleep: async () => undefined,
+      parseFeed: async () => {
+        attempts += 1;
+
+        if (attempts === 1) {
+          throw new Error("Unclosed root tag\nLine: 12\nColumn: 0\nChar: ");
+        }
+
+        return {
+          title: "Flaky",
+          items: [feedArticle("Recovered AI item", "https://flaky.example/recovered")],
+        };
+      },
+    });
+
+    const result = await gateway.callTool(
+      {
+        id: "truncated-audit",
+        name: "search_news",
+        arguments: { query: "AI", limit: 5 },
+      },
+      { runId: "run-truncated" },
+    );
+
+    expect(attempts).toBe(2);
+    expect(result.isError).toBe(false);
+    expect(audit.collections).toEqual([
+      expect.objectContaining({
+        runId: "run-truncated",
+        sourceId: "flaky",
+        status: "succeeded",
+        itemCount: 1,
+        error: null,
+        disposition: expect.objectContaining({ outcome: "available", fresh: 1 }),
+      }),
+    ]);
+  });
+
+  it("does not retry a malformed feed and records one request_failed row", async () => {
+    let attempts = 0;
+    const audit = new RecordingSourceAudit();
+    const gateway = new RssNewsGateway({
+      feeds: [
+        { id: "broken", url: "https://broken.example/feed" },
+        { id: "working", name: "Working", url: "https://working.example/feed" },
+      ],
+      now: () => FEED_NOW,
+      generateId: sequentialIds(),
+      sourceAudit: audit,
+      sleep: async () => undefined,
+      parseFeed: async (url) => {
+        if (url.includes("broken")) {
+          attempts += 1;
+          throw new Error("Feed not recognized as RSS 1 or 2.");
+        }
+
+        return {
+          title: "Working",
+          items: [feedArticle("Working AI item", "https://working.example/ai")],
+        };
+      },
+    });
+
+    const result = await gateway.callTool(
+      {
+        id: "malformed-audit",
+        name: "search_news",
+        arguments: { query: "AI", limit: 5 },
+      },
+      { runId: "run-malformed" },
+    );
+
+    expect(attempts).toBe(1);
+    expect(result.isError).toBe(false);
+    expect(audit.collections).toHaveLength(2);
+    expect(audit.collections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: "broken",
+          status: "failed",
+          itemCount: 0,
+          disposition: expect.objectContaining({ outcome: "request_failed" }),
+        }),
+        expect.objectContaining({
+          sourceId: "working",
+          status: "succeeded",
+          disposition: expect.objectContaining({ outcome: "available" }),
+        }),
+      ]),
+    );
   });
 
   it("fails a feed once after two transient errors and keeps the other feeds", async () => {
