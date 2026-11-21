@@ -48,7 +48,7 @@ const DEFAULT_MAX_EXCERPT_CHARS = 600;
 const MAX_FEEDS = 16;
 const MAX_RESULTS = 24;
 const RSS_USER_AGENT = "finance-ai-news-agent (+https://github.com/liuxzzz/finance-ai-news-agent)";
-const TRANSIENT_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524]);
 const TRANSIENT_NETWORK_CODES = new Set([
   "EAI_AGAIN",
   "ECONNABORTED",
@@ -67,8 +67,13 @@ const TRANSIENT_NETWORK_CODES = new Set([
 const HTTP_STATUS_IN_MESSAGE = /(?:\bstatus(?:\s+code)?|\bHTTP\/1\.[01])[:\s]+(\d{3})\b/i;
 const TRANSIENT_CODE_IN_MESSAGE =
   /\b(?:EAI_AGAIN|ECONNABORTED|ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EPIPE|ETIMEDOUT|UND_ERR_BODY_TIMEOUT|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_SOCKET)\b/;
-const OBVIOUS_FEED_PARSE_ERROR =
-  /unable to parse xml|feed not recognized as rss|default rss version not recognized|non-whitespace before first tag|invalid character|unexpected close tag|unclosed (?:root|xml)|no root element|attribute without value/i;
+// A body that stops before the root closes. Another fetch often returns the
+// rest of the document, so these are retried once like other transient failures.
+const TRUNCATED_FEED_PARSE_ERROR =
+  /unexpected close tag|unclosed (?:root|xml)|no root element|unexpected end/i;
+// HTML, an unrecognized feed, or XML that is malformed in a durable way.
+const PERMANENT_FEED_PARSE_ERROR =
+  /unable to parse xml|feed not recognized as rss|default rss version not recognized|non-whitespace before first tag|invalid character|attribute without value/i;
 
 export interface RssFeedConfig {
   id: string;
@@ -1201,8 +1206,12 @@ function defaultSleep(delayMs: number): Promise<void> {
  * `Status code <n>` and no status field. Timeouts use
  * `Request timed out after <ms>ms`. Socket failures reject the Node error,
  * whose `code` is ECONNRESET, ETIMEDOUT, ECONNREFUSED, ENOTFOUND, and similar.
- * XML parsing runs only after the response ends, so those parser messages are
- * not treated as truncated transfers.
+ * Retryable statuses are 408, 429, 500, 502, 503, 504, and 520–524. Other
+ * statuses, including 401, 403, 404, and 410, are final.
+ * A document that stops before the root closes (`unclosed root` / `unclosed xml`,
+ * `unexpected close tag`, `no root element`, `unexpected end`) is treated as a
+ * truncated transfer and retried once. A response that is not a feed, or XML
+ * that is malformed in a durable way, is not.
  */
 function isTransientFeedError(error: unknown): boolean {
   const status = httpStatus(error);
@@ -1253,7 +1262,11 @@ function hasTransientNetworkSignal(error: unknown, depth: number): boolean {
   }
 
   if (typeof error === "string") {
-    return !OBVIOUS_FEED_PARSE_ERROR.test(error) && messageIsTransient(error, "");
+    if (TRUNCATED_FEED_PARSE_ERROR.test(error)) {
+      return true;
+    }
+
+    return !PERMANENT_FEED_PARSE_ERROR.test(error) && messageIsTransient(error, "");
   }
 
   if (!isRecord(error)) {
@@ -1272,7 +1285,11 @@ function hasTransientNetworkSignal(error: unknown, depth: number): boolean {
     return true;
   }
 
-  if (OBVIOUS_FEED_PARSE_ERROR.test(message)) {
+  if (TRUNCATED_FEED_PARSE_ERROR.test(message)) {
+    return true;
+  }
+
+  if (PERMANENT_FEED_PARSE_ERROR.test(message)) {
     return false;
   }
 

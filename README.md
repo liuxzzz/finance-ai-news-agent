@@ -158,7 +158,7 @@ Feed 必须使用 HTTPS，本地 loopback 测试可以使用 HTTP。模型只能
 指定任意 URL。每个来源的成功、失败和原始条目分别写入 `source_runs` 与 `raw_source_items`。
 `source_runs.disposition` 另外记下该来源是有可用新闻、空源、条目被过滤，还是请求失败。
 `item_count` 仍是规范化后的条数，包含年龄窗口之外的条目。
-超时、连接中断以及 HTTP 429/502/503/504 会在短延迟后重试该 Feed 一次，审计只记录最终结果。
+超时、连接中断、传送中被截断的 XML（unclosed root、unclosed xml、unexpected close tag、no root element、unexpected end），以及 HTTP 408/429/500/502/503/504/520/521/522/523/524 会在短延迟后重试该 Feed 一次，审计只记录最终结果。无法识别为 RSS 的响应、HTML 页面，以及明显永久损坏的 XML（default RSS version not recognized、non-whitespace before first tag、invalid character、attribute without value）不会重试；401/403/404/410 同样不会重试。
 同一条目有多个链接时，优先使用 `rel=alternate` 的 HTML 文章地址，其次才是其他 http(s) 链接；音频和视频 enclosure 不会当作文章 URL。`isPermaLink="false"` 的 guid 只保留为外部 ID，http(s) 形式的 Atom `id` 只在前面都没有可用地址时用作链接。xml2js 写成对象的标题、摘要和正文会先抽成文本，再参与关键词排序。Atom 中写成文本、CDATA 或空元素的 `<link>`，以及单条无法解析的 `published` / `updated`，不再让整份 Feed 解析失败；无法解析的时间只从该条去掉，没有其他可用时间的条目仍记为 invalid。
 候选内容会清理追踪参数、生成内容指纹、跨源聚类，并与最近 7 天成功 Run 比较后再均衡选取。审核通过的
 stories 会在独立的可恢复阶段与最近 30 天事件匹配，形成首次出现、最近更新和更新次数时间线。RSS
