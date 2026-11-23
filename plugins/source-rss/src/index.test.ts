@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createServer } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 
 import type {
   RawSourceItemRecord,
@@ -1815,6 +1815,175 @@ describe("RSS news gateway", () => {
       });
     }
   });
+
+  it("decodes a BOM and declared charsets before parsing the feed", async () => {
+    const requests: Array<{ path: string; accept: string; userAgent: string }> = [];
+    const hits = new Map<string, number>();
+    let retrySlept = 0;
+
+    await withLoopbackFeedServer(
+      (request, response) => {
+        const path = request.url ?? "/";
+        hits.set(path, (hits.get(path) ?? 0) + 1);
+        requests.push({
+          path,
+          accept: request.headers.accept ?? "",
+          userAgent: request.headers["user-agent"] ?? "",
+        });
+        const route = ENCODED_FEED_ROUTES.find((item) => item.path === path);
+
+        if (route === undefined) {
+          response.writeHead(404, { connection: "close" });
+          response.end("missing fixture");
+          return;
+        }
+
+        response.writeHead(200, {
+          "content-type": route.contentType,
+          connection: "close",
+        });
+        response.end(route.body);
+      },
+      async (baseUrl) => {
+        const audit = new RecordingSourceAudit();
+        const gateway = new RssNewsGateway({
+          feeds: ENCODED_FEED_ROUTES.map((route) => ({
+            id: route.id,
+            name: route.id,
+            url: `${baseUrl}${route.path}`,
+          })),
+          timeoutMs: 2_000,
+          now: () => FEED_NOW,
+          sourceAudit: audit,
+          sleep: async () => {
+            retrySlept += 1;
+          },
+        });
+        const result = await gateway.callTool(
+          {
+            id: "encoded-feeds",
+            name: "search_news",
+            arguments: { query: "unmatched", limit: 20 },
+          },
+          { runId: "run-encoded-feeds" },
+        );
+        const items = (result.content as { items: Array<{ title: string; url: string }> }).items;
+        const broken = audit.collections.find((collection) => collection.sourceId === "broken");
+
+        expect(result.isError).toBe(false);
+        expect(retrySlept).toBe(0);
+        expect(requests.map((request) => request.path).sort()).toEqual(
+          ENCODED_FEED_ROUTES.map((route) => route.path).sort(),
+        );
+        expect(
+          requests.every(
+            (request) =>
+              request.accept ===
+                "application/rss+xml, application/atom+xml, application/xml, text/xml, text/plain" &&
+              request.userAgent ===
+                "finance-ai-news-agent (+https://github.com/liuxzzz/finance-ai-news-agent)",
+          ),
+        ).toBe(true);
+        expect(hits.get("/broken")).toBe(1);
+        expect(items.map((item) => [item.title, item.url]).sort()).toEqual(
+          ENCODED_FEED_ROUTES.filter((route) => route.title !== undefined)
+            .map((route) => [route.title, route.link])
+            .sort(),
+        );
+        expect(broken).toEqual(
+          expect.objectContaining({
+            status: "failed",
+            itemCount: 0,
+            disposition: expect.objectContaining({ outcome: "request_failed" }),
+            error: expect.objectContaining({
+              message: expect.stringMatching(/Invalid character/i),
+            }),
+          }),
+        );
+        expect(
+          audit.collections.filter((collection) => collection.sourceId === "broken"),
+        ).toHaveLength(1);
+      },
+    );
+  });
+
+  it("still retries one truncated body and one transient HTTP status after decoding", async () => {
+    const hits = new Map<string, number>();
+
+    await withLoopbackFeedServer(
+      (request, response) => {
+        const path = request.url ?? "/";
+        const attempt = (hits.get(path) ?? 0) + 1;
+        hits.set(path, attempt);
+
+        if (path === "/truncated") {
+          response.writeHead(200, {
+            "content-type": "application/rss+xml; charset=utf-8",
+            connection: "close",
+          });
+          response.end(
+            attempt === 1
+              ? `<?xml version="1.0"?><rss version="2.0"><channel><item><title>Partial`
+              : rssXml({ title: "Recovered truncation", link: "https://example.com/truncated" }),
+          );
+          return;
+        }
+
+        if (path === "/status") {
+          if (attempt === 1) {
+            response.writeHead(503, { "content-type": "text/plain", connection: "close" });
+            response.end("unavailable");
+            return;
+          }
+
+          response.writeHead(200, {
+            "content-type": "application/rss+xml; charset=utf-8",
+            connection: "close",
+          });
+          response.end(rssXml({ title: "Recovered status", link: "https://example.com/status" }));
+          return;
+        }
+
+        response.writeHead(404, { connection: "close" });
+        response.end("missing fixture");
+      },
+      async (baseUrl) => {
+        const audit = new RecordingSourceAudit();
+        const gateway = new RssNewsGateway({
+          feeds: [
+            { id: "truncated", name: "Truncated", url: `${baseUrl}/truncated` },
+            { id: "status", name: "Status", url: `${baseUrl}/status` },
+          ],
+          timeoutMs: 2_000,
+          now: () => FEED_NOW,
+          retryDelayMs: 5_000,
+          sleep: async () => undefined,
+          sourceAudit: audit,
+        });
+        const result = await gateway.callTool(
+          {
+            id: "encoded-retry",
+            name: "search_news",
+            arguments: { query: "unmatched", limit: 5 },
+          },
+          { runId: "run-encoded-retry" },
+        );
+        const items = (result.content as { items: Array<{ title: string; url: string }> }).items;
+
+        expect(result.isError).toBe(false);
+        expect(hits.get("/truncated")).toBe(2);
+        expect(hits.get("/status")).toBe(2);
+        expect(items.map((item) => [item.title, item.url]).sort()).toEqual([
+          ["Recovered status", "https://example.com/status"],
+          ["Recovered truncation", "https://example.com/truncated"],
+        ]);
+        expect(audit.collections.map((collection) => collection.status).sort()).toEqual([
+          "succeeded",
+          "succeeded",
+        ]);
+      },
+    );
+  });
 });
 
 class RecordingSourceAudit implements SourceAuditStore {
@@ -1850,4 +2019,244 @@ function feedArticle(title: string, url: string) {
     isoDate: "2026-08-04T09:00:00.000Z",
     contentSnippet: title,
   };
+}
+
+const GBK_CHAR_BYTES: Readonly<Record<string, readonly number[]>> = {
+  财: [0xb2, 0xc6],
+  经: [0xbe, 0xad],
+  简: [0xbc, 0xf2],
+  报: [0xb1, 0xa8],
+};
+const BIG5_CHAR_BYTES: Readonly<Record<string, readonly number[]>> = {
+  財: [0xb0, 0x5d],
+  經: [0xb8, 0x67],
+};
+const LATIN_CHAR_BYTES: Readonly<Record<string, readonly number[]>> = {
+  é: [0xe9],
+};
+
+interface EncodedFeedRoute {
+  id: string;
+  path: string;
+  contentType: string;
+  body: Buffer;
+  title?: string;
+  link?: string;
+}
+
+const ENCODED_FEED_ROUTES: readonly EncodedFeedRoute[] = [
+  encodedRoute({
+    id: "plain",
+    contentType: "application/rss+xml; charset=utf-8",
+    title: "Plain UTF-8",
+    link: "https://example.com/plain",
+    body: Buffer.from(
+      rssXml({ title: "Plain UTF-8", link: "https://example.com/plain", encoding: "UTF-8" }),
+      "utf8",
+    ),
+  }),
+  encodedRoute({
+    id: "bom",
+    contentType: "application/rss+xml; charset=utf-8",
+    title: "UTF-8 BOM",
+    link: "https://example.com/bom",
+    body: Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(
+        rssXml({ title: "UTF-8 BOM", link: "https://example.com/bom", encoding: "UTF-8" }),
+        "utf8",
+      ),
+    ]),
+  }),
+  encodedRoute({
+    id: "bomlatin",
+    contentType: "text/xml; charset=iso-8859-1",
+    title: "BOM over latin1",
+    link: "https://example.com/bom-latin1",
+    body: Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(
+        rssXml({
+          title: "BOM over latin1",
+          link: "https://example.com/bom-latin1",
+          encoding: "UTF-8",
+        }),
+        "utf8",
+      ),
+    ]),
+  }),
+  encodedRoute({
+    id: "gbk",
+    contentType: "application/rss+xml",
+    title: "财经简报",
+    link: "https://example.com/gbk",
+    body: encodeFeedBytes(
+      rssXml({ title: "财经简报", link: "https://example.com/gbk", encoding: "GBK" }),
+      GBK_CHAR_BYTES,
+    ),
+  }),
+  encodedRoute({
+    id: "gb2312",
+    contentType: "text/xml",
+    title: "财经简报",
+    link: "https://example.com/gb2312",
+    body: encodeFeedBytes(
+      rssXml({ title: "财经简报", link: "https://example.com/gb2312", encoding: "GB2312" }),
+      GBK_CHAR_BYTES,
+    ),
+  }),
+  encodedRoute({
+    id: "gb18030",
+    contentType: "application/xml",
+    title: "财经简报",
+    link: "https://example.com/gb18030",
+    body: encodeFeedBytes(
+      rssXml({ title: "财经简报", link: "https://example.com/gb18030", encoding: "GB18030" }),
+      GBK_CHAR_BYTES,
+    ),
+  }),
+  encodedRoute({
+    id: "headergbk",
+    contentType: 'application/xml; charset="gbk"',
+    title: "财经简报",
+    link: "https://example.com/header-gbk",
+    body: encodeFeedBytes(
+      rssXml({ title: "财经简报", link: "https://example.com/header-gbk", encoding: "UTF-8" }),
+      GBK_CHAR_BYTES,
+    ),
+  }),
+  encodedRoute({
+    id: "xmlgbk",
+    contentType: "application/rss+xml; charset=utf-8",
+    title: "财经简报",
+    link: "https://example.com/xml-gbk",
+    body: encodeFeedBytes(
+      rssXml({ title: "财经简报", link: "https://example.com/xml-gbk", encoding: "GBK" }),
+      GBK_CHAR_BYTES,
+    ),
+  }),
+  encodedRoute({
+    id: "utf16",
+    contentType: "application/rss+xml; charset=utf-8",
+    title: "UTF-16 LE",
+    link: "https://example.com/utf16",
+    body: Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from(
+        rssXml({ title: "UTF-16 LE", link: "https://example.com/utf16", encoding: "UTF-8" }),
+        "utf16le",
+      ),
+    ]),
+  }),
+  encodedRoute({
+    id: "latin",
+    contentType: "text/xml; charset=iso-8859-1",
+    title: "Café brief",
+    link: "https://example.com/latin",
+    body: encodeFeedBytes(
+      rssXml({ title: "Café brief", link: "https://example.com/latin", encoding: "ISO-8859-1" }),
+      LATIN_CHAR_BYTES,
+    ),
+  }),
+  encodedRoute({
+    id: "big5",
+    contentType: "application/rss+xml",
+    title: "財經",
+    link: "https://example.com/big5",
+    body: encodeFeedBytes(
+      rssXml({ title: "財經", link: "https://example.com/big5", encoding: "Big5" }),
+      BIG5_CHAR_BYTES,
+    ),
+  }),
+  {
+    id: "broken",
+    path: "/broken",
+    contentType: "application/xml",
+    body: Buffer.from(
+      `<?xml version="1.0" encoding="GBK"?><rss version="2.0"><channel><item><title>bad &#x1; char</title><link>https://example.com/broken</link><pubDate>Tue, 04 Aug 2026 10:00:00 GMT</pubDate></item></channel></rss>`,
+      "utf8",
+    ),
+  },
+];
+
+function encodedRoute(input: {
+  id: string;
+  contentType: string;
+  body: Buffer;
+  title: string;
+  link: string;
+}): EncodedFeedRoute {
+  return {
+    id: input.id,
+    path: `/${input.id}`,
+    contentType: input.contentType,
+    body: input.body,
+    title: input.title,
+    link: input.link,
+  };
+}
+
+function rssXml(input: { title: string; link: string; encoding?: string }): string {
+  const declaration =
+    input.encoding === undefined
+      ? `<?xml version="1.0"?>`
+      : `<?xml version="1.0" encoding="${input.encoding}"?>`;
+  return `${declaration}<rss version="2.0"><channel><title>Encoded</title><item><title>${input.title}</title><link>${input.link}</link><pubDate>Tue, 04 Aug 2026 10:00:00 GMT</pubDate></item></channel></rss>`;
+}
+
+function encodeFeedBytes(
+  xml: string,
+  multibyte: Readonly<Record<string, readonly number[]>>,
+): Buffer {
+  const chunks: number[] = [];
+
+  for (const char of xml) {
+    const point = char.codePointAt(0);
+
+    if (point === undefined) {
+      continue;
+    }
+
+    if (point < 0x80) {
+      chunks.push(point);
+      continue;
+    }
+
+    const encoded = multibyte[char];
+
+    if (encoded === undefined) {
+      throw new Error(`Missing fixture bytes for U+${point.toString(16)}.`);
+    }
+
+    for (const byte of encoded) {
+      chunks.push(byte);
+    }
+  }
+
+  return Buffer.from(chunks);
+}
+
+async function withLoopbackFeedServer(
+  onRequest: (request: IncomingMessage, response: ServerResponse) => void,
+  run: (baseUrl: string) => Promise<void>,
+): Promise<void> {
+  const server = createServer(onRequest);
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+
+  if (address === null || typeof address === "string") {
+    server.close();
+    throw new Error("RSS test server did not bind to a TCP port.");
+  }
+
+  try {
+    await run(`http://127.0.0.1:${address.port}`);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
 }

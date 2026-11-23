@@ -48,6 +48,35 @@ const DEFAULT_MAX_EXCERPT_CHARS = 600;
 const MAX_FEEDS = 16;
 const MAX_RESULTS = 24;
 const RSS_USER_AGENT = "finance-ai-news-agent (+https://github.com/liuxzzz/finance-ai-news-agent)";
+const RSS_FEED_ACCEPT =
+  "application/rss+xml, application/atom+xml, application/xml, text/xml, text/plain";
+const FEED_ENCODING_LABELS: Record<string, string> = {
+  ascii: "utf-8",
+  "us-ascii": "utf-8",
+  utf8: "utf-8",
+  "utf-8": "utf-8",
+  "utf-16": "utf-16",
+  utf16: "utf-16",
+  "utf-16le": "utf-16le",
+  utf16le: "utf-16le",
+  "ucs-2": "utf-16le",
+  ucs2: "utf-16le",
+  "utf-16be": "utf-16be",
+  utf16be: "utf-16be",
+  gbk: "gbk",
+  gb2312: "gbk",
+  "gb-2312": "gbk",
+  gb_2312: "gbk",
+  gb18030: "gb18030",
+  big5: "big5",
+  "big5-hkscs": "big5",
+  cp1252: "windows-1252",
+  "windows-1252": "windows-1252",
+  "iso-8859-1": "iso-8859-1",
+  "iso8859-1": "iso-8859-1",
+  latin1: "iso-8859-1",
+  "latin-1": "iso-8859-1",
+};
 const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524]);
 const TRANSIENT_NETWORK_CODES = new Set([
   "EAI_AGAIN",
@@ -232,10 +261,9 @@ export class RssNewsGateway implements ToolGateway {
     if (options.parseFeed !== undefined) {
       readFeed = options.parseFeed;
     } else {
-      const parser = createRssParser(
-        positiveInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, "timeoutMs"),
-      );
-      readFeed = (url) => parser.parseURL(url);
+      const timeoutMs = positiveInteger(options.timeoutMs ?? DEFAULT_TIMEOUT_MS, "timeoutMs");
+      const parser = createRssParser();
+      readFeed = (url) => parseFeedUrl(parser, url, timeoutMs);
     }
 
     this.parseFeed = async (url) => adaptParsedFeed(await readFeed(url));
@@ -527,11 +555,9 @@ export function validateRssFeedUrl(value: string): URL {
  * a literal `<date>` off `item.date`, which is the Dublin Core alias `setISODate`
  * already consumed.
  */
-function createRssParser(timeoutMs: number): Parser {
+function createRssParser(): Parser {
   installAtomFeedTolerance();
   return new Parser({
-    headers: { "User-Agent": RSS_USER_AGENT },
-    timeout: timeoutMs,
     customFields: {
       item: [
         "published",
@@ -544,6 +570,198 @@ function createRssParser(timeoutMs: number): Parser {
       ],
     },
   });
+}
+
+/**
+ * rss-parser 3.13 `parseURL` decodes with Node stream encodings and never reads
+ * the XML declaration. A UTF-8 BOM then survives as `ï»¿` when the body is not
+ * decoded as UTF-8 (`non-whitespace before first tag`), and GBK/GB2312/GB18030
+ * bytes become `invalid character` or a garbled title. Fetch the raw bytes,
+ * drop the BOM, decode from the BOM, Content-Type charset, and XML encoding,
+ * then parse the Unicode string.
+ */
+async function parseFeedUrl(parser: Parser, url: string, timeoutMs: number): Promise<unknown> {
+  const response = await fetch(url, {
+    headers: {
+      Accept: RSS_FEED_ACCEPT,
+      "User-Agent": RSS_USER_AGENT,
+    },
+    redirect: "follow",
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (!response.ok) {
+    const status = response.status;
+    await response.body?.cancel().catch(() => undefined);
+    throw Object.assign(new Error(`Status code ${status}`), { status });
+  }
+
+  const xml = decodeFeedDocument(
+    new Uint8Array(await response.arrayBuffer()),
+    response.headers.get("content-type"),
+  );
+  return parser.parseString(xml);
+}
+
+/**
+ * A byte-order mark wins. A legacy XML encoding wins over a missing, UTF-8, or
+ * US-ASCII Content-Type, because those feeds are often GBK while the header
+ * still says UTF-8. Any other supported Content-Type charset wins over the XML
+ * declaration. Otherwise the XML encoding is used, then UTF-8.
+ */
+function decodeFeedDocument(bytes: Uint8Array, contentType: string | null): string {
+  const stripped = stripByteOrderMark(bytes);
+  const encoding = selectFeedEncoding(
+    stripped.encoding,
+    contentTypeCharset(contentType),
+    xmlDeclaredEncoding(stripped.bytes),
+  );
+  return new TextDecoder(resolveFeedEndian(encoding, stripped.bytes), {
+    fatal: false,
+    ignoreBOM: true,
+  }).decode(stripped.bytes);
+}
+
+function selectFeedEncoding(
+  byteOrderMark: string | undefined,
+  headerCharset: string | undefined,
+  xmlEncoding: string | undefined,
+): string {
+  if (byteOrderMark !== undefined) {
+    return byteOrderMark;
+  }
+
+  const header = supportedFeedEncoding(headerCharset);
+  const declared = supportedFeedEncoding(xmlEncoding);
+
+  if (
+    declared !== undefined &&
+    isLegacyFeedEncoding(declared) &&
+    (header === undefined || header === "utf-8")
+  ) {
+    return declared;
+  }
+
+  return header ?? declared ?? "utf-8";
+}
+
+function isLegacyFeedEncoding(encoding: string): boolean {
+  return encoding !== "utf-8" && encoding !== "utf-16" && !encoding.startsWith("utf-16");
+}
+
+function supportedFeedEncoding(label: string | undefined): string | undefined {
+  if (label === undefined) {
+    return undefined;
+  }
+
+  const normalized = label
+    .trim()
+    .toLowerCase()
+    .replace(/^["']|["']$/g, "");
+
+  if (normalized.length === 0 || normalized.length > 40) {
+    return undefined;
+  }
+
+  const known = FEED_ENCODING_LABELS[normalized];
+
+  if (known !== undefined) {
+    return known;
+  }
+
+  try {
+    return new TextDecoder(normalized).encoding;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveFeedEndian(encoding: string, bytes: Uint8Array): string {
+  if (encoding !== "utf-16") {
+    return encoding;
+  }
+
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x00 &&
+    bytes[1] === 0x3c &&
+    bytes[2] === 0x00 &&
+    bytes[3] === 0x3f
+  ) {
+    return "utf-16be";
+  }
+
+  return "utf-16le";
+}
+
+function stripByteOrderMark(bytes: Uint8Array): { bytes: Uint8Array; encoding?: string } {
+  if (hasPrefix(bytes, [0xef, 0xbb, 0xbf])) {
+    return { bytes: bytes.subarray(3), encoding: "utf-8" };
+  }
+
+  // UTF-32 LE starts with the same two bytes as UTF-16 LE. Leave it untouched.
+  if (hasPrefix(bytes, [0xff, 0xfe, 0x00, 0x00])) {
+    return { bytes };
+  }
+
+  if (hasPrefix(bytes, [0xff, 0xfe])) {
+    return { bytes: bytes.subarray(2), encoding: "utf-16le" };
+  }
+
+  if (hasPrefix(bytes, [0xfe, 0xff])) {
+    return { bytes: bytes.subarray(2), encoding: "utf-16be" };
+  }
+
+  return { bytes };
+}
+
+function hasPrefix(bytes: Uint8Array, prefix: readonly number[]): boolean {
+  if (bytes.length < prefix.length) {
+    return false;
+  }
+
+  return prefix.every((byte, index) => bytes[index] === byte);
+}
+
+function contentTypeCharset(contentType: string | null): string | undefined {
+  if (contentType === null) {
+    return undefined;
+  }
+
+  const match = /charset\s*=\s*(?:"([^"]*)"|'([^']*)'|([^;\s]+))/i.exec(contentType);
+  const value = (match?.[1] ?? match?.[2] ?? match?.[3])?.trim();
+  return value === undefined || value.length === 0 ? undefined : value;
+}
+
+function xmlDeclaredEncoding(bytes: Uint8Array): string | undefined {
+  const limit = Math.min(bytes.length, 512);
+  let sample = "";
+
+  for (let index = 0; index < limit; index += 1) {
+    const byte = bytes[index] ?? 0;
+
+    if (byte === 0) {
+      continue;
+    }
+
+    if (byte > 0x7f) {
+      break;
+    }
+
+    sample += String.fromCharCode(byte);
+
+    if (sample.endsWith("?>")) {
+      break;
+    }
+  }
+
+  if (!sample.trimStart().startsWith("<?xml")) {
+    return undefined;
+  }
+
+  const match = /<\?xml\b[^>]*?\bencoding\s*=\s*(?:"([^"]*)"|'([^']*)')/i.exec(sample);
+  const value = (match?.[1] ?? match?.[2])?.trim();
+  return value === undefined || value.length === 0 ? undefined : value;
 }
 
 /**
@@ -1202,16 +1420,20 @@ function defaultSleep(delayMs: number): Promise<void> {
 }
 
 /**
- * rss-parser 3.13 `parseURL` rejects HTTP failures as `Error` with message
- * `Status code <n>` and no status field. Timeouts use
- * `Request timed out after <ms>ms`. Socket failures reject the Node error,
- * whose `code` is ECONNRESET, ETIMEDOUT, ECONNREFUSED, ENOTFOUND, and similar.
- * Retryable statuses are 408, 429, 500, 502, 503, 504, and 520–524. Other
- * statuses, including 401, 403, 404, and 410, are final.
+ * The default reader fetches the body and rejects HTTP failures as `Error`
+ * with message `Status code <n>` and a `status` field. `AbortSignal.timeout`
+ * rejects with `TimeoutError`. rss-parser 3.13 `parseURL` used the same status
+ * message without a status field, and `Request timed out after <ms>ms`; those
+ * shapes stay recognized. Socket failures reject the Node error, whose `code`
+ * is ECONNRESET, ETIMEDOUT, ECONNREFUSED, ENOTFOUND, and similar. Retryable
+ * statuses are 408, 429, 500, 502, 503, 504, and 520–524. Other statuses,
+ * including 401, 403, 404, and 410, are final.
  * A document that stops before the root closes (`unclosed root` / `unclosed xml`,
  * `unexpected close tag`, `no root element`, `unexpected end`) is treated as a
- * truncated transfer and retried once. A response that is not a feed, or XML
- * that is malformed in a durable way, is not.
+ * truncated transfer and retried once. A leading BOM is removed and the
+ * declared charset is decoded before this check, so those bytes are not treated
+ * as durable XML damage. A response that is not a feed, or XML that is still
+ * malformed after that decoding, is not retried.
  */
 function isTransientFeedError(error: unknown): boolean {
   const status = httpStatus(error);
