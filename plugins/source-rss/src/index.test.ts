@@ -1907,6 +1907,118 @@ describe("RSS news gateway", () => {
     );
   });
 
+  it("strips XML 1.0 control characters after decoding and does not retry them", async () => {
+    const hits = new Map<string, number>();
+    let retrySlept = 0;
+    const controlsXml = [
+      `<?xml version="1.0" encoding="UTF-8"?>`,
+      `<rss version="2.0"><channel><item>`,
+      `<title>市场\t快\u0000讯\n更\u001f新</title>`,
+      `<description>正文含\u000b垂直\r\u000c制表</description>`,
+      `<link>https://example.com/controls</link>`,
+      `<pubDate>Tue, 04 Aug 2026 10:00:00 GMT</pubDate>`,
+      `</item></channel></rss>`,
+    ].join("");
+    const utf16Xml = rssXml({
+      title: "UTF16\u0000标题\u001f保留",
+      link: "https://example.com/utf16-controls",
+      encoding: "UTF-8",
+    });
+    const utf16Body = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(utf16Xml, "utf16le")]);
+    const stillBrokenXml = `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><item><title>still\u0000broken &#x1;</title><link>https://example.com/still-broken</link><pubDate>Tue, 04 Aug 2026 10:00:00 GMT</pubDate></item></channel></rss>`;
+
+    await withLoopbackFeedServer(
+      (request, response) => {
+        const path = request.url ?? "/";
+        hits.set(path, (hits.get(path) ?? 0) + 1);
+
+        if (path === "/controls") {
+          response.writeHead(200, {
+            "content-type": "application/rss+xml; charset=utf-8",
+            connection: "close",
+          });
+          response.end(controlsXml);
+          return;
+        }
+
+        if (path === "/utf16-controls") {
+          response.writeHead(200, {
+            "content-type": "application/rss+xml; charset=utf-8",
+            connection: "close",
+          });
+          response.end(utf16Body);
+          return;
+        }
+
+        if (path === "/still-broken") {
+          response.writeHead(200, {
+            "content-type": "application/xml; charset=utf-8",
+            connection: "close",
+          });
+          response.end(stillBrokenXml);
+          return;
+        }
+
+        response.writeHead(404, { connection: "close" });
+        response.end("missing fixture");
+      },
+      async (baseUrl) => {
+        const audit = new RecordingSourceAudit();
+        const gateway = new RssNewsGateway({
+          feeds: [
+            { id: "controls", name: "Controls", url: `${baseUrl}/controls` },
+            { id: "utf16controls", name: "UTF-16 controls", url: `${baseUrl}/utf16-controls` },
+            { id: "stillbroken", name: "Still broken", url: `${baseUrl}/still-broken` },
+          ],
+          timeoutMs: 2_000,
+          now: () => FEED_NOW,
+          retryDelayMs: 5_000,
+          sleep: async () => {
+            retrySlept += 1;
+          },
+          sourceAudit: audit,
+        });
+        const result = await gateway.callTool(
+          {
+            id: "xml-controls",
+            name: "search_news",
+            arguments: { query: "unmatched", limit: 5 },
+          },
+          { runId: "run-xml-controls" },
+        );
+        const items = (
+          result.content as { items: Array<{ title: string; url: string; excerpt: string }> }
+        ).items;
+        const stillBroken = audit.collections.find(
+          (collection) => collection.sourceId === "stillbroken",
+        );
+
+        expect(result.isError).toBe(false);
+        expect(retrySlept).toBe(0);
+        expect(hits.get("/controls")).toBe(1);
+        expect(hits.get("/utf16-controls")).toBe(1);
+        expect(hits.get("/still-broken")).toBe(1);
+        expect(items.map((item) => [item.title, item.url, item.excerpt]).sort()).toEqual([
+          ["UTF16标题保留", "https://example.com/utf16-controls", "UTF16标题保留"],
+          ["市场 快讯 更新", "https://example.com/controls", "正文含垂直 制表"],
+        ]);
+        expect(stillBroken).toEqual(
+          expect.objectContaining({
+            status: "failed",
+            itemCount: 0,
+            disposition: expect.objectContaining({ outcome: "request_failed" }),
+            error: expect.objectContaining({
+              message: expect.stringMatching(/Invalid character/i),
+            }),
+          }),
+        );
+        expect(
+          audit.collections.filter((collection) => collection.sourceId === "stillbroken"),
+        ).toHaveLength(1);
+      },
+    );
+  });
+
   it("still retries one truncated body and one transient HTTP status after decoding", async () => {
     const hits = new Map<string, number>();
 

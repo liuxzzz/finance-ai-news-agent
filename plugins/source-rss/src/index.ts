@@ -578,7 +578,8 @@ function createRssParser(): Parser {
  * decoded as UTF-8 (`non-whitespace before first tag`), and GBK/GB2312/GB18030
  * bytes become `invalid character` or a garbled title. Fetch the raw bytes,
  * drop the BOM, decode from the BOM, Content-Type charset, and XML encoding,
- * then parse the Unicode string.
+ * then drop XML 1.0 C0 controls other than tab, LF, and CR. Character
+ * references and other structural damage stay in the text for the parser.
  */
 async function parseFeedUrl(parser: Parser, url: string, timeoutMs: number): Promise<unknown> {
   const response = await fetch(url, {
@@ -596,9 +597,11 @@ async function parseFeedUrl(parser: Parser, url: string, timeoutMs: number): Pro
     throw Object.assign(new Error(`Status code ${status}`), { status });
   }
 
-  const xml = decodeFeedDocument(
-    new Uint8Array(await response.arrayBuffer()),
-    response.headers.get("content-type"),
+  const xml = stripIllegalXmlControls(
+    decodeFeedDocument(
+      new Uint8Array(await response.arrayBuffer()),
+      response.headers.get("content-type"),
+    ),
   );
   return parser.parseString(xml);
 }
@@ -620,6 +623,46 @@ function decodeFeedDocument(bytes: Uint8Array, contentType: string | null): stri
     fatal: false,
     ignoreBOM: true,
   }).decode(stripped.bytes);
+}
+
+/**
+ * XML 1.0 allows tab, LF, and CR, and rejects the other C0 controls. Feeds put
+ * those in titles and descriptions; sax then reports `Invalid character` and
+ * the document is dropped. Remove only those code points. Leave character
+ * references such as `&#x1;` untouched so structural damage still fails once.
+ */
+function stripIllegalXmlControls(xml: string): string {
+  if (!containsIllegalXmlControl(xml)) {
+    return xml;
+  }
+
+  let stripped = "";
+
+  for (let index = 0; index < xml.length; index += 1) {
+    const code = xml.charCodeAt(index);
+
+    if (isIllegalXmlControl(code)) {
+      continue;
+    }
+
+    stripped += xml.charAt(index);
+  }
+
+  return stripped;
+}
+
+function containsIllegalXmlControl(xml: string): boolean {
+  for (let index = 0; index < xml.length; index += 1) {
+    if (isIllegalXmlControl(xml.charCodeAt(index))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isIllegalXmlControl(code: number): boolean {
+  return code <= 0x1f && code !== 0x09 && code !== 0x0a && code !== 0x0d;
 }
 
 function selectFeedEncoding(
@@ -1430,10 +1473,11 @@ function defaultSleep(delayMs: number): Promise<void> {
  * including 401, 403, 404, and 410, are final.
  * A document that stops before the root closes (`unclosed root` / `unclosed xml`,
  * `unexpected close tag`, `no root element`, `unexpected end`) is treated as a
- * truncated transfer and retried once. A leading BOM is removed and the
- * declared charset is decoded before this check, so those bytes are not treated
- * as durable XML damage. A response that is not a feed, or XML that is still
- * malformed after that decoding, is not retried.
+ * truncated transfer and retried once. A leading BOM is removed, the declared
+ * charset is decoded, and XML 1.0 C0 controls other than tab, LF, and CR are
+ * removed before this check, so those bytes are not durable XML damage. A
+ * response that is not a feed, or XML that is still malformed after that
+ * cleanup, is not retried.
  */
 function isTransientFeedError(error: unknown): boolean {
   const status = httpStatus(error);
